@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Private security vulnerability
+    url: https://github.com/alphablueofficial/eql-audio-crash-workaround/security/advisories/new
+    about: Report privilege-boundary, rollback, tampering, registry, or code-execution concerns privately.

@@ -9,7 +9,7 @@ Fatal error occurred in mainthread! (Release Client #630)
 
 This is intended for players who can reach server select but crash during audio initialization. A strong confirmation is that `Sound=0` lets the game continue, but removes game audio.
 
-> **Status:** v1.0.0-rc3 release candidate. The underlying workaround is verified on one affected PC. Additional affected-player confirmations are still wanted.
+> **Status:** v1.0.0-rc4 release candidate. The underlying workaround is verified on one affected PC. Additional affected-player confirmations are still wanted.
 
 ## Download and use
 
@@ -20,7 +20,7 @@ This is intended for players who can reach server select but crash during audio 
 5. In the official EQL LaunchPad, click **PLAY** normally.
 6. Leave the small command window open until it reports that Windows MIDI was restored.
 
-That is the complete normal workflow. There is nothing to install or configure.
+That is the complete normal workflow. There is nothing to install or configure. RC4 requires 64-bit Windows and the built-in 64-bit Windows PowerShell 5.1.
 
 ## What the workaround does
 
@@ -96,6 +96,7 @@ Launch EQL Audio Fix.cmd
 Restore Windows MIDI.cmd
 EQL-Audio-Fix.ps1
 README.md
+SECURITY.md
 LICENSE
 ```
 
@@ -128,7 +129,7 @@ Do not manually force the registry change. Copy the exact error and your current
 
 ### LaunchPad is not found
 
-The launcher opens a file picker. Select the official EverQuest Legends `LaunchPad.exe`.
+The launcher opens a file picker. Select the official EverQuest Legends `LaunchPad.exe`. RC4 also asks instead of guessing when it detects more than one possible EQL installation, such as old beta and current-release folders.
 
 ### The game still crashes
 
@@ -139,6 +140,12 @@ The watchdog restores Windows MIDI. Preserve:
 - whether the launcher reported successful restoration.
 
 Review logs before posting because they can contain local installation paths and MIDI-device names. They do not contain saved EQL passwords or session tokens.
+
+## Reporting results and security issues
+
+- Use the [RC field-test form](https://github.com/alphablueofficial/eql-audio-crash-workaround/issues/new?template=field-test.yml) for compatibility and live-launch results from another affected PC.
+- Use [private vulnerability reporting](https://github.com/alphablueofficial/eql-audio-crash-workaround/security/advisories/new) for privilege-boundary, rollback, tampering, registry, or code-execution concerns.
+- Do not post credentials, tokens, unreviewed crash dumps, or full transaction folders publicly. See [SECURITY.md](SECURITY.md).
 
 ## Technical evidence
 

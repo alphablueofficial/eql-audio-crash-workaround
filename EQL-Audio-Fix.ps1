@@ -16,7 +16,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:Version = '1.0.0-rc3'
+$script:Version = '1.0.0-rc4'
 $script:RegistrySubKey = 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Drivers32'
 $script:RegistryDisplayPath = 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Drivers32'
 $script:RegistryValueName = 'midi'
@@ -633,7 +633,11 @@ function Resolve-LaunchPadPath {
     $known = @(Get-KnownLaunchPadCandidates)
     if ($known.Count -eq 1) { return $known[0] }
     if ($known.Count -gt 1) {
-        return @($known | Sort-Object { if ($_ -match 'EverQuest Legends') { 0 } else { 1 } }, Length)[0]
+        if ($AllowPrompt) {
+            Write-Status ('Found {0} possible EQL installations. Select the LaunchPad.exe you actually use.' -f $known.Count) 'WARN'
+            return Select-LaunchPadInteractively
+        }
+        return $null
     }
     if ($AllowPrompt) { return Select-LaunchPadInteractively }
     return $null

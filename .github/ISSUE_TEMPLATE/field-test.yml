@@ -1,0 +1,77 @@
+name: RC field-test report
+description: Report a compatibility or live-launch result from another affected PC
+title: "[Field test] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for testing the release candidate. Do not include account credentials, tokens, crash dumps, or unreviewed transaction files. Local paths and MIDI-device names may identify your setup.
+  - type: input
+    id: release
+    attributes:
+      label: Release and ZIP SHA-256
+      description: Copy the release name and the SHA-256 you verified.
+      placeholder: "v1.0.0-rc4 — SHA-256 ..."
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version and architecture
+      placeholder: "Windows 11 64-bit, build ..."
+    validations:
+      required: true
+  - type: input
+    id: install
+    attributes:
+      label: EQL installation location
+      description: You may replace your Windows username with [USER].
+      placeholder: "D:\\Games\\EverQuest Legends"
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: Audio and MIDI setup
+      description: List relevant virtual audio/MIDI software and visible MIDI outputs. Do not post serial numbers.
+      placeholder: "Wave Link / VoiceMeeter / Sonar / VB-Cable / loopMIDI / none"
+    validations:
+      required: true
+  - type: textarea
+    id: signature
+    attributes:
+      label: Original crash signature
+      description: Paste only the relevant current-run dbg.txt sequence around server selection, Sound Manager, and the fatal.
+    validations:
+      required: true
+  - type: dropdown
+    id: compatibility
+    attributes:
+      label: Compatibility result
+      options:
+        - Passed
+        - Stopped safely with an error
+        - Did not run
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Live result
+      description: State whether EQL reached character select, game audio was audible, a delayed fatal occurred, and the command window reported restoration.
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: Exact error or restoration message
+      description: Remove personal paths if desired. Never post passwords, tokens, or account data.
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Safety confirmations
+      options:
+        - label: I used the newest GitHub prerelease and verified its published ZIP SHA-256.
+          required: true
+        - label: I reviewed the text above and removed credentials, tokens, and unnecessary personal paths.
+          required: true
