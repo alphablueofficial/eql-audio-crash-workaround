@@ -7,7 +7,7 @@ Server selected → Sound Manager loaded →
 Fatal error occurred in mainthread! (Release Client #630)
 ```
 
-> **Status:** `v1.0.0-rc6` release candidate. The underlying GS Synth isolation mechanism has repeated live evidence on one affected PC. The exact RC6 package has deterministic non-mutating and adversarial verification, but has not completed a new live UAC/EQL launch. Additional affected-player confirmation is still needed. This is not a universal fix for every `#630` crash.
+> **Status:** `v1.0.0-rc6` release candidate. The exact GitHub-hosted RC6 ZIP completed a guarded live `Sound=1` launch on the original affected PC: it passed `Sound Manager loaded` without `#630`, reached character select, recorded success, and restored the exact registry value and all original MIDI outputs. Additional affected-player confirmation is still needed. This is not a universal fix for every `#630` crash.
 
 ## Is this for you?
 
@@ -272,9 +272,11 @@ CMicrosoftGSWavetableSynth::LoadDLSFile
   → wdmaud.drv null vtable read (RCX = 0)
 ```
 
-On the original affected PC, watchdog-backed GS Synth isolation passed repeated `Sound=1` launches with audible game audio and exact restoration. Removing the isolation later allowed the same cold-launch `#630` to recur; reinstating isolation passed again. Those live runs establish evidence for the underlying isolation mechanism, not a live end-to-end test of the exact RC6 package topology.
+On the original affected PC, watchdog-backed GS Synth isolation passed repeated `Sound=1` launches with audible game audio and exact restoration. Removing the isolation later allowed the same cold-launch `#630` to recur; reinstating isolation passed again.
 
-RC6 retains release-candidate status because its exact final bytes have deterministic non-mutating and adversarial verification but have not completed a new live UAC/EQL launch. Live confirmation from additional affected PCs is still required.
+The exact GitHub-hosted RC6 ZIP later completed the full guarded path on that PC: official LaunchPad validation, UAC handoff, watchdog readiness, GS Synth isolation, `Sound Manager loaded`, character select, success receipt, exact `midi=wdmaud.drv` restoration, and restoration of all four original MIDI outputs. EQL remained alive and responsive at character select through a delayed-fatal check. Audible output was not independently confirmed through the remote-access session during that specific RC6 run.
+
+RC6 retains release-candidate status until additional affected PCs provide live field confirmation.
 
 This is a community workaround, not an official Daybreak, Game Jawn, Elgato, or Microsoft fix.
 
