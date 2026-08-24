@@ -16,7 +16,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:Version = '1.0.0-rc2'
+$script:Version = '1.0.0-rc3'
 $script:RegistrySubKey = 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Drivers32'
 $script:RegistryDisplayPath = 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Drivers32'
 $script:RegistryValueName = 'midi'
@@ -204,8 +204,12 @@ function Stage-ProtectedRuntimeScript {
 }
 
 function Invoke-ElevatedCopy {
-    param([ValidateSet('Elevated', 'Recover')][string]$TargetMode)
-    $sourceHash = Assert-ScriptIdentity $ExpectedScriptSha256
+    param(
+        [ValidateSet('Elevated', 'Recover')][string]$TargetMode,
+        [ValidatePattern('^[0-9a-fA-F]{64}$')][string]$EntrySha256
+    )
+    [void](Assert-ScriptIdentity $EntrySha256)
+    $sourceHash = $EntrySha256.ToLowerInvariant()
     $utf8 = New-Object Text.UTF8Encoding($false, $true)
     $sourceBase64 = [Convert]::ToBase64String($utf8.GetBytes($script:SourcePath))
     $launchPadBase64 = [Convert]::ToBase64String($utf8.GetBytes($LaunchPadPath))
@@ -823,9 +827,10 @@ function Invoke-StaleRecovery {
 }
 
 function Invoke-DryRun {
+    param([ValidatePattern('^[0-9a-fA-F]{64}$')][string]$EntrySha256)
     if (-not [Environment]::Is64BitOperatingSystem -or -not [Environment]::Is64BitProcess) { throw 'This workaround requires 64-bit Windows PowerShell on 64-bit Windows.' }
     $callerIntegrityRid = Assert-MediumIntegrityProcess $PID
-    $scriptHash = Assert-ScriptIdentity $ExpectedScriptSha256
+    $scriptHash = Assert-ScriptIdentity $EntrySha256
     $launchPad = Resolve-LaunchPadPath $LaunchPadPath $false
     $launchPadDetails = if ($launchPad) { Assert-OfficialLaunchPad $launchPad } else { $null }
     $snapshot = Get-RegistrySnapshot
@@ -999,11 +1004,17 @@ try {
             Invoke-Watchdog
         }
         'Check' {
-            [void](Assert-ScriptIdentity $ExpectedScriptSha256)
-            Invoke-DryRun
+            if (-not (Get-TrustedSourceBytes)) { throw 'Check mode must start through the CMD bootstrap.' }
+            $entrySha256 = Assert-ScriptIdentity $ExpectedScriptSha256
+            Invoke-DryRun $entrySha256
         }
         'Recover' {
-            if (-not (Test-IsAdministrator)) { $exitCode = Invoke-ElevatedCopy 'Recover'; break }
+            if (-not (Test-IsAdministrator)) {
+                if (-not (Get-TrustedSourceBytes)) { throw 'Recover mode must start through Restore Windows MIDI.cmd.' }
+                $entrySha256 = Assert-ScriptIdentity $ExpectedScriptSha256
+                $exitCode = Invoke-ElevatedCopy 'Recover' $entrySha256
+                break
+            }
             if (-not (Get-TrustedSourceBytes)) { throw 'Recover mode requires the hash-verifying elevated bootstrap.' }
             [void](Assert-ScriptIdentity $ExpectedScriptSha256)
             Enter-WorkaroundMutex
@@ -1024,8 +1035,9 @@ try {
         }
         'Launch' {
             if (Test-IsAdministrator) { throw 'Run the CMD launcher normally; it requests UAC only after opening LaunchPad.' }
-            [void](Assert-ScriptIdentity $ExpectedScriptSha256)
-            Invoke-DryRun
+            if (-not (Get-TrustedSourceBytes)) { throw 'Launch mode must start through Launch EQL Audio Fix.cmd.' }
+            $entrySha256 = Assert-ScriptIdentity $ExpectedScriptSha256
+            Invoke-DryRun $entrySha256
             if (Get-Process -Name eqgame -ErrorAction SilentlyContinue) { throw 'eqgame.exe is already running. Close EQL first.' }
             $approvedPath = Resolve-LaunchPadPath $LaunchPadPath $true
             if (-not $approvedPath) { throw 'The official EverQuest Legends LaunchPad.exe was not selected.' }
@@ -1033,7 +1045,7 @@ try {
             $normalLaunchPad = Start-OrUseOfficialLaunchPad $approvedPath
             Write-Status ('Verified and opened signed Daybreak LaunchPad at medium integrity before UAC (PID {0}, RID 0x{1:X}).' -f $normalLaunchPad.Id, $normalLaunchPad.IntegrityRid) 'PASS'
             $LaunchPadPath = $approvedPath
-            $exitCode = Invoke-ElevatedCopy 'Elevated'
+            $exitCode = Invoke-ElevatedCopy 'Elevated' $entrySha256
         }
     }
 }

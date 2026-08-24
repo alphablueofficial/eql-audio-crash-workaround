@@ -9,7 +9,7 @@ Fatal error occurred in mainthread! (Release Client #630)
 
 This is intended for players who can reach server select but crash during audio initialization. A strong confirmation is that `Sound=0` lets the game continue, but removes game audio.
 
-> **Status:** v1.0.0-rc2 release candidate. The underlying workaround is verified on one affected PC. Additional affected-player confirmations are still wanted.
+> **Status:** v1.0.0-rc3 release candidate. The underlying workaround is verified on one affected PC. Additional affected-player confirmations are still wanted.
 
 ## Download and use
 
@@ -105,7 +105,7 @@ For each GitHub release:
 - compute the ZIP's SHA-256 locally if desired;
 - compare it with the published hash before running.
 
-Before UAC, the normal process hashes the script's exact bytes. Elevated PowerShell starts from a fixed encoded bootstrap—not from the user-writable script. That bootstrap reads the raw source bytes, verifies the expected SHA-256 **before parsing them**, executes only those verified in-memory bytes, and then stages the same bytes into protected ProgramData. Its internal `Watchdog` and `Probe` modes must match that same hash. Any mismatch stops before registry mutation.
+The CMD button is the normal-integrity trust bootstrap. It reads the script's raw bytes once, hashes them, and executes those exact bytes from memory; direct normal `-File` entry is rejected. That immutable entry digest survives compatibility checks and LaunchPad startup. Elevated PowerShell then starts from a fixed encoded bootstrap—not from the user-writable script—and requires the current disk bytes to match the original entry digest **before parsing them**. It executes only those matching in-memory bytes, stages the same bytes into protected ProgramData, and binds its internal `Watchdog` and `Probe` modes to the same hash. Any post-entry substitution stops before elevated script execution or registry mutation.
 
 A future legitimate Daybreak certificate-subject change will fail closed until this project is reviewed and updated.
 
