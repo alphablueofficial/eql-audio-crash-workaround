@@ -16,7 +16,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:Version = '1.0.0-rc5'
+$script:Version = '1.0.0-rc6'
 $script:RegistrySubKey = 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Drivers32'
 $script:RegistryDisplayPath = 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Drivers32'
 $script:RegistryValueName = 'midi'
@@ -646,10 +646,12 @@ function Resolve-LaunchPadPath {
 function Get-CurrentRunLogSegment {
     param([string]$Path, [string]$BaselineText)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
-    $current = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+    [string]$current = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
     if ($null -eq $current) { return '' }
-    if ($BaselineText -and $current.StartsWith($BaselineText, [StringComparison]::Ordinal)) {
-        return $current.Substring($BaselineText.Length)
+    $baselineLength = if ($null -eq $BaselineText) { 0 } else { $BaselineText.Length }
+    if ($baselineLength -gt 0 -and $current.Length -ge $baselineLength -and
+        $current.StartsWith($BaselineText, [StringComparison]::Ordinal)) {
+        return $current.Substring($baselineLength)
     }
     return $current
 }

@@ -7,7 +7,7 @@ Server selected → Sound Manager loaded →
 Fatal error occurred in mainthread! (Release Client #630)
 ```
 
-> **Status:** `v1.0.0-rc5` release candidate. The underlying GS Synth isolation mechanism has repeated live evidence on one affected PC. The exact RC5 package has deterministic non-mutating and adversarial verification, but has not completed a new live UAC/EQL launch. Additional affected-player confirmation is still needed. This is not a universal fix for every `#630` crash.
+> **Status:** `v1.0.0-rc6` release candidate. The underlying GS Synth isolation mechanism has repeated live evidence on one affected PC. The exact RC6 package has deterministic non-mutating and adversarial verification, but has not completed a new live UAC/EQL launch. Additional affected-player confirmation is still needed. This is not a universal fix for every `#630` crash.
 
 ## Is this for you?
 
@@ -31,10 +31,10 @@ If the compatibility check does not recognize your PC, the workaround stops inst
 
 ### 1. Download the correct file
 
-Open the [`v1.0.0-rc5` release page](https://github.com/alphablueofficial/eql-audio-crash-workaround/releases/tag/v1.0.0-rc5) and download:
+Open the [`v1.0.0-rc6` release page](https://github.com/alphablueofficial/eql-audio-crash-workaround/releases/tag/v1.0.0-rc6) and download:
 
 ```text
-EQL-Audio-Crash-Workaround-v1.0.0-rc5.zip
+EQL-Audio-Crash-Workaround-v1.0.0-rc6.zip
 ```
 
 Download the matching `.sha256.txt` file if you want to verify the ZIP. Do **not** use GitHub's automatically generated **Source code** ZIP; it is not the prepared player package.
@@ -65,7 +65,7 @@ The official LaunchPad opens at normal user privilege **before** the UAC prompt.
 
 Leave the small command window open while EQL starts. The workaround waits for character-select initialization or a fatal/timeout, restores Windows MIDI, verifies that restoration, and reports the result.
 
-There is nothing to install or configure. RC5 requires 64-bit Windows and the built-in 64-bit Windows PowerShell 5.1.
+There is nothing to install or configure. RC6 requires 64-bit Windows and the built-in 64-bit Windows PowerShell 5.1.
 
 ## What you should see
 
@@ -104,9 +104,9 @@ midi = wdmaud.drv    (REG_SZ)
 
 ## Different installs and audio setups
 
-RC5 is not tied to the original PC's installation path or audio setup.
+RC6 is not tied to the original PC's installation path or audio setup.
 
-| Your setup | What RC5 does |
+| Your setup | What RC6 does |
 |---|---|
 | EQL is installed on another fixed drive | Searches common EQL locations on all fixed drives |
 | EQL is in a custom location | Uses an EQL desktop shortcut when available or opens a file picker |
@@ -180,13 +180,13 @@ This command does not verify every file in the ZIP or `CHECKSUMS-SHA256.txt`. Us
 Every release includes a ZIP checksum file. On Windows, you can also calculate the hash yourself from Command Prompt:
 
 ```bat
-certutil -hashfile "EQL-Audio-Crash-Workaround-v1.0.0-rc5.zip" SHA256
+certutil -hashfile "EQL-Audio-Crash-Workaround-v1.0.0-rc6.zip" SHA256
 ```
 
 Compare the result with:
 
 ```text
-EQL-Audio-Crash-Workaround-v1.0.0-rc5.zip.sha256.txt
+EQL-Audio-Crash-Workaround-v1.0.0-rc6.zip.sha256.txt
 ```
 
 Only run the package if the values match and you obtained it from this repository's release page.
@@ -199,7 +199,7 @@ Do not force the registry change. Preserve the exact error message and the curre
 
 ### A file picker opens
 
-Select the official EverQuest Legends `LaunchPad.exe` that you normally use. RC5 opens the picker when it cannot identify one installation uniquely.
+Select the official EverQuest Legends `LaunchPad.exe` that you normally use. RC6 opens the picker when it cannot identify one installation uniquely.
 
 ### The game still crashes
 
@@ -249,7 +249,7 @@ The CMD launcher reads the script's raw bytes once, hashes them, and executes th
 
 ## Technical transaction sequence
 
-During a live launch, RC5:
+During a live launch, RC6:
 
 1. The CMD bootstrap explicitly invokes the built-in 64-bit Windows PowerShell and executes the hash-bound script bytes from memory.
 2. At normal user privilege, the script checks the supported 64-bit registry/MIDI baseline, validates the selected `LaunchPad.exe`, opens it at medium integrity, and refuses an already-running elevated copy.
@@ -272,9 +272,9 @@ CMicrosoftGSWavetableSynth::LoadDLSFile
   → wdmaud.drv null vtable read (RCX = 0)
 ```
 
-On the original affected PC, watchdog-backed GS Synth isolation passed repeated `Sound=1` launches with audible game audio and exact restoration. Removing the isolation later allowed the same cold-launch `#630` to recur; reinstating isolation passed again. Those live runs establish evidence for the underlying isolation mechanism, not a live end-to-end test of the exact RC5 package topology.
+On the original affected PC, watchdog-backed GS Synth isolation passed repeated `Sound=1` launches with audible game audio and exact restoration. Removing the isolation later allowed the same cold-launch `#630` to recur; reinstating isolation passed again. Those live runs establish evidence for the underlying isolation mechanism, not a live end-to-end test of the exact RC6 package topology.
 
-RC5 retains release-candidate status because its exact final bytes have deterministic non-mutating and adversarial verification but have not completed a new live UAC/EQL launch. Live confirmation from additional affected PCs is still required.
+RC6 retains release-candidate status because its exact final bytes have deterministic non-mutating and adversarial verification but have not completed a new live UAC/EQL launch. Live confirmation from additional affected PCs is still required.
 
 This is a community workaround, not an official Daybreak, Game Jawn, Elgato, or Microsoft fix.
 
