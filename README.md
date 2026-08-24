@@ -9,7 +9,7 @@ Fatal error occurred in mainthread! (Release Client #630)
 
 This is intended for players who can reach server select but crash during audio initialization. A strong confirmation is that `Sound=0` lets the game continue, but removes game audio.
 
-> **Status:** Release candidate. The underlying workaround is verified on one affected PC. Additional affected-player confirmations are still wanted.
+> **Status:** v1.0.0-rc2 release candidate. The underlying workaround is verified on one affected PC. Additional affected-player confirmations are still wanted.
 
 ## Download and use
 
@@ -35,7 +35,7 @@ During EQL startup, the launcher:
    ```
 2. Verifies that Microsoft GS Wavetable Synth is currently visible and that no EQL process is already running.
 3. Verifies the official `LaunchPad.exe` Authenticode signature, exact current Daybreak certificate subject, and Daybreak product metadata.
-4. Opens the official LaunchPad **before UAC**, at normal user privilege.
+4. Opens the official LaunchPad **before UAC**, verifies its process token is at normal medium integrity, and refuses an already-running elevated copy.
 5. After UAC, exports the complete 64-bit `Drivers32` key and creates protected rollback state.
 6. Starts an independent restoration watchdog and requires its ready acknowledgement.
 7. Temporarily removes only the 64-bit `midi=wdmaud.drv` value.
@@ -89,7 +89,15 @@ It restores only a recorded active transaction and refuses unexpected state.
 
 ## Trust and source review
 
-The project intentionally contains no compiled executable. The two user-facing files are small CMD wrappers; all behavior is readable under [`support/`](support/).
+The project intentionally contains no compiled executable. The entire implementation is one readable [`EQL-Audio-Fix.ps1`](EQL-Audio-Fix.ps1) file plus two tiny CMD buttons:
+
+```text
+Launch EQL Audio Fix.cmd
+Restore Windows MIDI.cmd
+EQL-Audio-Fix.ps1
+README.md
+LICENSE
+```
 
 For each GitHub release:
 
@@ -97,7 +105,7 @@ For each GitHub release:
 - compute the ZIP's SHA-256 locally if desired;
 - compare it with the published hash before running.
 
-The main script pins the exact watchdog and MIDI-probe hashes. Before elevated helper execution, it stages those exact bytes into protected ProgramData and verifies them again.
+Before UAC, the normal process hashes the script's exact bytes. Elevated PowerShell starts from a fixed encoded bootstrap—not from the user-writable script. That bootstrap reads the raw source bytes, verifies the expected SHA-256 **before parsing them**, executes only those verified in-memory bytes, and then stages the same bytes into protected ProgramData. Its internal `Watchdog` and `Probe` modes must match that same hash. Any mismatch stops before registry mutation.
 
 A future legitimate Daybreak certificate-subject change will fail closed until this project is reviewed and updated.
 

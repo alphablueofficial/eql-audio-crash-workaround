@@ -1,19 +1,22 @@
 [CmdletBinding()]
 param(
-    [switch]$DryRun,
-    [switch]$RecoverOnly,
-    [switch]$SelfTest,
+    [ValidateSet('Launch', 'Check', 'Elevated', 'Recover', 'Watchdog', 'Probe')]
+    [string]$Mode = 'Launch',
     [string]$LaunchPadPath = '',
     [ValidateRange(60, 3600)]
     [int]$LaunchTimeoutSeconds = 900,
     [ValidateRange(30, 1200)]
-    [int]$InitializationTimeoutSeconds = 600
+    [int]$InitializationTimeoutSeconds = 600,
+    [string]$StatePath = '',
+    [string]$ReadyPath = '',
+    [string]$ExpectedScriptSha256 = '',
+    [string]$TrustedSourcePath = ''
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:Version = '1.0.0-rc1'
+$script:Version = '1.0.0-rc2'
 $script:RegistrySubKey = 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Drivers32'
 $script:RegistryDisplayPath = 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Drivers32'
 $script:RegistryValueName = 'midi'
@@ -21,18 +24,12 @@ $script:ExpectedValue = 'wdmaud.drv'
 $script:ExpectedKind = 'String'
 $script:GsSynthName = 'Microsoft GS Wavetable Synth'
 $script:ApprovedLaunchPadSubject = 'CN=Daybreak Game Company LLC, OU=daybreak game company, O=Daybreak Game Company LLC, L=San Diego, S=California, C=US'
-$script:PackageRoot = $PSScriptRoot
-$script:SourceProbePath = Join-Path $PSScriptRoot 'EQL-Midi-Probe.ps1'
-$script:SourceWatchdogPath = Join-Path $PSScriptRoot 'EQL-GS-Synth-Watchdog.ps1'
-$script:ExpectedProbeSha256 = 'cc50e17da5ab37cc67c7ec6a85df2b36cd596055230f8c0299353e39a189995f'
-$script:ExpectedWatchdogSha256 = '1d6cbf0dab110af189ecf55e31ea21725f55d50b3a2a06fee8f0c51875c2cdd0'
-$script:ProbePath = $script:SourceProbePath
-$script:WatchdogPath = $script:SourceWatchdogPath
 $script:PowerShellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$script:DataRoot = Join-Path $env:LOCALAPPDATA 'EQL-GS-Synth-Workaround'
-$script:ConfigPath = Join-Path $script:DataRoot 'config.json'
 $script:BackupRoot = Join-Path $env:ProgramData 'EQL-GS-Synth-Workaround\Transactions'
 $script:RuntimeRoot = Join-Path $env:ProgramData ('EQL-GS-Synth-Workaround\Runtime\' + $script:Version)
+$script:SourcePath = if ($TrustedSourcePath) { [IO.Path]::GetFullPath($TrustedSourcePath) } else { $PSCommandPath }
+$script:RuntimePath = $script:SourcePath
+$script:RuntimeSha256 = ''
 $script:LogFile = $null
 $script:InstanceMutex = $null
 $script:OwnsInstanceMutex = $false
@@ -136,95 +133,101 @@ function Initialize-ProtectedBackupRoot {
     }
 }
 
+function Get-BytesSha256 {
+    param([byte[]]$Bytes)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try { return -join ($algorithm.ComputeHash($Bytes) | ForEach-Object { $_.ToString('x2') }) }
+    finally { $algorithm.Dispose() }
+}
+
 function Get-FileSha256 {
     param([string]$Path)
     $item = Get-Item -LiteralPath $Path -Force
-    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-        throw ('Refusing a reparse-point helper file: ' + $Path)
+    if ($item.PSIsContainer -or $item.Length -le 0 -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw ('Script is missing, empty, not regular, or a reparse point: ' + $Path)
     }
-    if (-not $item.PSIsContainer -and $item.Length -gt 0) {
-        $stream = $null
-        $algorithm = $null
-        try {
-            $stream = New-Object IO.FileStream($item.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
-            $algorithm = [Security.Cryptography.SHA256]::Create()
-            $bytes = $algorithm.ComputeHash($stream)
-            return -join ($bytes | ForEach-Object { $_.ToString('x2') })
-        }
-        finally {
-            if ($algorithm) { $algorithm.Dispose() }
-            if ($stream) { $stream.Dispose() }
-        }
-    }
-    throw ('Helper file is missing, empty, or not a regular file: ' + $Path)
+    $stream = New-Object IO.FileStream($item.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try { return -join ($algorithm.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') }) }
+    finally { $algorithm.Dispose(); $stream.Dispose() }
 }
 
-function Assert-HelperSourceIntegrity {
-    $actualProbe = Get-FileSha256 $script:SourceProbePath
-    $actualWatchdog = Get-FileSha256 $script:SourceWatchdogPath
-    if ($actualProbe -ne $script:ExpectedProbeSha256) {
-        throw ('MIDI probe hash mismatch. Expected {0}; found {1}.' -f $script:ExpectedProbeSha256, $actualProbe)
-    }
-    if ($actualWatchdog -ne $script:ExpectedWatchdogSha256) {
-        throw ('Watchdog hash mismatch. Expected {0}; found {1}.' -f $script:ExpectedWatchdogSha256, $actualWatchdog)
-    }
-    return [ordered]@{ Probe = $actualProbe; Watchdog = $actualWatchdog }
+function Get-TrustedSourceBytes {
+    $variable = Get-Variable -Name EqlAudioFixTrustedBytes -Scope Global -ErrorAction SilentlyContinue
+    if ($variable -and $variable.Value -is [byte[]]) { return ,([byte[]]$variable.Value) }
+    return $null
 }
 
-function Stage-ProtectedRuntimeHelpers {
-    if (-not (Test-IsAdministrator)) { throw 'Protected helper staging requires administrator rights.' }
-    $hashes = Assert-HelperSourceIntegrity
-    foreach ($entry in @(
-        [pscustomobject]@{ Source = $script:SourceProbePath; Destination = (Join-Path $script:RuntimeRoot 'EQL-Midi-Probe.ps1'); Expected = $hashes.Probe },
-        [pscustomobject]@{ Source = $script:SourceWatchdogPath; Destination = (Join-Path $script:RuntimeRoot 'EQL-GS-Synth-Watchdog.ps1'); Expected = $hashes.Watchdog }
-    )) {
-        if (Test-Path -LiteralPath $entry.Destination) {
-            $existing = Get-Item -LiteralPath $entry.Destination -Force
-            if ($existing.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-                throw ('Refusing a reparse-point staged helper: ' + $entry.Destination)
-            }
-        }
-        $bytes = [IO.File]::ReadAllBytes($entry.Source)
-        $temporary = $entry.Destination + '.tmp-' + $PID
-        [IO.File]::WriteAllBytes($temporary, $bytes)
-        if (Test-Path -LiteralPath $entry.Destination) {
-            $replaceBackup = $entry.Destination + '.replace-backup-' + $PID
-            if (Test-Path -LiteralPath $replaceBackup) { [IO.File]::Delete($replaceBackup) }
-            [IO.File]::Replace($temporary, $entry.Destination, $replaceBackup)
-            if (Test-Path -LiteralPath $replaceBackup) { [IO.File]::Delete($replaceBackup) }
-        }
-        else {
-            [IO.File]::Move($temporary, $entry.Destination)
-        }
-        $stagedHash = Get-FileSha256 $entry.Destination
-        if ($stagedHash -ne [string]$entry.Expected) {
-            throw ('Protected helper staging hash mismatch: ' + $entry.Destination)
-        }
+function Assert-ScriptIdentity {
+    param([string]$Expected = '')
+    $trustedBytes = Get-TrustedSourceBytes
+    $actual = if ($trustedBytes) { Get-BytesSha256 $trustedBytes } else { Get-FileSha256 $script:SourcePath }
+    if ($Expected -and ($Expected -notmatch '^[0-9a-fA-F]{64}$' -or
+        -not $actual.Equals($Expected, [StringComparison]::OrdinalIgnoreCase))) {
+        throw ('Script SHA-256 mismatch. Expected {0}; found {1}.' -f $Expected, $actual)
     }
-    $script:ProbePath = Join-Path $script:RuntimeRoot 'EQL-Midi-Probe.ps1'
-    $script:WatchdogPath = Join-Path $script:RuntimeRoot 'EQL-GS-Synth-Watchdog.ps1'
+    $script:RuntimePath = $script:SourcePath
+    $script:RuntimeSha256 = $actual
+    return $actual
+}
+
+function Write-BytesAtomic {
+    param([string]$Path, [byte[]]$Bytes)
+    $temporary = $Path + '.tmp-' + $PID
+    [IO.File]::WriteAllBytes($temporary, $Bytes)
+    if (-not (Test-Path -LiteralPath $Path)) { [IO.File]::Move($temporary, $Path); return }
+    $backup = $Path + '.replace-backup-' + $PID
+    if (Test-Path -LiteralPath $backup) { [IO.File]::Delete($backup) }
+    [IO.File]::Replace($temporary, $Path, $backup)
+    if (Test-Path -LiteralPath $backup) { [IO.File]::Delete($backup) }
+}
+
+function Stage-ProtectedRuntimeScript {
+    param([string]$Expected)
+    if (-not (Test-IsAdministrator)) { throw 'Protected script staging requires administrator rights.' }
+    $bytes = Get-TrustedSourceBytes
+    if (-not $bytes) { throw 'Elevated mode did not receive hash-verified bootstrap bytes.' }
+    $actual = Get-BytesSha256 $bytes
+    if (-not $actual.Equals($Expected, [StringComparison]::OrdinalIgnoreCase)) { throw 'Trusted bootstrap bytes no longer match the expected hash.' }
+    $destination = Join-Path $script:RuntimeRoot 'EQL-Audio-Fix.ps1'
+    if (Test-Path -LiteralPath $destination) {
+        $item = Get-Item -LiteralPath $destination -Force
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw ('Refusing reparse-point runtime script: ' + $destination) }
+    }
+    Write-BytesAtomic $destination $bytes
+    $staged = Get-FileSha256 $destination
+    if (-not $staged.Equals($actual, [StringComparison]::OrdinalIgnoreCase)) { throw 'Protected runtime staging hash mismatch.' }
+    Remove-Variable -Name EqlAudioFixTrustedBytes -Scope Global -ErrorAction SilentlyContinue
+    $script:RuntimePath = $destination
+    $script:RuntimeSha256 = $staged
+    return $destination
 }
 
 function Invoke-ElevatedCopy {
-    $arguments = New-Object Collections.Generic.List[string]
-    $arguments.Add('-NoProfile')
-    $arguments.Add('-ExecutionPolicy')
-    $arguments.Add('Bypass')
-    $arguments.Add('-File')
-    $arguments.Add((Quote-ProcessArgument $PSCommandPath))
-    if ($RecoverOnly) { $arguments.Add('-RecoverOnly') }
-    if (-not [string]::IsNullOrWhiteSpace($LaunchPadPath)) {
-        $arguments.Add('-LaunchPadPath')
-        $arguments.Add((Quote-ProcessArgument $LaunchPadPath))
-    }
-    $arguments.Add('-LaunchTimeoutSeconds')
-    $arguments.Add([string]$LaunchTimeoutSeconds)
-    $arguments.Add('-InitializationTimeoutSeconds')
-    $arguments.Add([string]$InitializationTimeoutSeconds)
-
-    Write-Host 'Windows will ask for administrator approval. The workaround needs it only for one temporary 64-bit registry value.'
+    param([ValidateSet('Elevated', 'Recover')][string]$TargetMode)
+    $sourceHash = Assert-ScriptIdentity $ExpectedScriptSha256
+    $utf8 = New-Object Text.UTF8Encoding($false, $true)
+    $sourceBase64 = [Convert]::ToBase64String($utf8.GetBytes($script:SourcePath))
+    $launchPadBase64 = [Convert]::ToBase64String($utf8.GetBytes($LaunchPadPath))
+    $bootstrap = @"
+`$ErrorActionPreference = 'Stop'
+`$utf8 = New-Object Text.UTF8Encoding(`$false, `$true)
+`$source = `$utf8.GetString([Convert]::FromBase64String('$sourceBase64'))
+`$launchPad = `$utf8.GetString([Convert]::FromBase64String('$launchPadBase64'))
+`$bytes = [IO.File]::ReadAllBytes(`$source)
+`$algorithm = [Security.Cryptography.SHA256]::Create()
+try { `$actual = -join (`$algorithm.ComputeHash(`$bytes) | ForEach-Object { `$_.ToString('x2') }) }
+finally { `$algorithm.Dispose() }
+if (-not `$actual.Equals('$sourceHash', [StringComparison]::OrdinalIgnoreCase)) { throw 'Source changed before elevated bootstrap verification.' }
+`$global:EqlAudioFixTrustedBytes = `$bytes
+`$text = `$utf8.GetString(`$bytes)
+`$block = [ScriptBlock]::Create(`$text)
+& `$block -Mode '$TargetMode' -ExpectedScriptSha256 '$sourceHash' -TrustedSourcePath `$source -LaunchPadPath `$launchPad -LaunchTimeoutSeconds $LaunchTimeoutSeconds -InitializationTimeoutSeconds $InitializationTimeoutSeconds
+"@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrap))
+    Write-Host 'Windows will ask for administrator approval for one temporary 64-bit registry value.'
     try {
-        $process = Start-Process -FilePath $script:PowerShellExe -Verb RunAs -Wait -PassThru -ArgumentList ($arguments -join ' ')
+        $process = Start-Process -FilePath $script:PowerShellExe -Verb RunAs -Wait -PassThru -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + $encoded)
         return [int]$process.ExitCode
     }
     catch {
@@ -236,49 +239,39 @@ function Invoke-ElevatedCopy {
 function Write-JsonAtomic {
     param([string]$Path, [object]$Value)
     $directory = Split-Path -Parent $Path
-    if (-not (Test-Path -LiteralPath $directory)) {
-        [IO.Directory]::CreateDirectory($directory) | Out-Null
-    }
-    $temporary = $Path + '.tmp'
-    $json = $Value | ConvertTo-Json -Depth 12
+    if (-not (Test-Path -LiteralPath $directory)) { [IO.Directory]::CreateDirectory($directory) | Out-Null }
     $utf8 = New-Object Text.UTF8Encoding($false)
-    [IO.File]::WriteAllText($temporary, $json, $utf8)
-    if (Test-Path -LiteralPath $Path) {
-        $replaceBackup = $Path + '.replace-backup-' + $PID
-        if (Test-Path -LiteralPath $replaceBackup) { [IO.File]::Delete($replaceBackup) }
-        [IO.File]::Replace($temporary, $Path, $replaceBackup)
-        if (Test-Path -LiteralPath $replaceBackup) { [IO.File]::Delete($replaceBackup) }
+    Write-BytesAtomic $Path ($utf8.GetBytes(($Value | ConvertTo-Json -Depth 12)))
+}
+
+function Invoke-WithDrivers32 {
+    param([bool]$Writable, [scriptblock]$Action)
+    $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+        [Microsoft.Win32.RegistryHive]::LocalMachine,
+        [Microsoft.Win32.RegistryView]::Registry64)
+    $key = $null
+    try {
+        $key = $baseKey.OpenSubKey($script:RegistrySubKey, $Writable)
+        if ($null -eq $key) { throw 'The Windows Drivers32 registry key does not exist.' }
+        return & $Action $key
     }
-    else {
-        [IO.File]::Move($temporary, $Path)
+    finally {
+        if ($key) { $key.Dispose() }
+        $baseKey.Dispose()
     }
 }
 
 function Get-RegistrySnapshot {
-    $baseKey = $null
-    $key = $null
-    try {
-        $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
-            [Microsoft.Win32.RegistryHive]::LocalMachine,
-            [Microsoft.Win32.RegistryView]::Registry64
-        )
-        $key = $baseKey.OpenSubKey($script:RegistrySubKey, $false)
-        if ($null -eq $key) { throw 'The Windows Drivers32 registry key does not exist.' }
-        $present = $key.GetValueNames() -contains $script:RegistryValueName
-        if (-not $present) {
+    return Invoke-WithDrivers32 $false {
+        param($key)
+        if ($key.GetValueNames() -notcontains $script:RegistryValueName) {
             return [ordered]@{ Present = $false; Value = $null; Kind = $null }
         }
-        $value = $key.GetValue(
-            $script:RegistryValueName,
-            $null,
-            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
-        )
-        $kind = $key.GetValueKind($script:RegistryValueName).ToString()
-        return [ordered]@{ Present = $true; Value = [string]$value; Kind = [string]$kind }
-    }
-    finally {
-        if ($key) { $key.Dispose() }
-        if ($baseKey) { $baseKey.Dispose() }
+        return [ordered]@{
+            Present = $true
+            Value = [string]$key.GetValue($script:RegistryValueName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            Kind = [string]$key.GetValueKind($script:RegistryValueName).ToString()
+        }
     }
 }
 
@@ -304,26 +297,15 @@ function Assert-WorkaroundState {
     if (-not [bool]$State.OriginalPresent) { throw 'State does not contain the required original value.' }
     if (-not ([string]$State.OriginalValue).Equals($script:ExpectedValue, [StringComparison]::OrdinalIgnoreCase)) { throw 'State original value is not approved.' }
     if ([string]$State.OriginalKind -ne $script:ExpectedKind) { throw 'State original registry type is not approved.' }
+    if ([int]$State.ParentPid -le 0) { throw 'State parent PID is invalid.' }
+    $parentStart = [DateTime]::MinValue
+    if (-not [DateTime]::TryParse([string]$State.ParentStartTimeUtc, [ref]$parentStart)) { throw 'State parent start time is invalid.' }
+    if ([int64]$State.DeadlineEpoch -le 0) { throw 'State deadline is invalid.' }
 }
 
 function Remove-GsSynthRegistration {
-    $baseKey = $null
-    $key = $null
-    try {
-        $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
-            [Microsoft.Win32.RegistryHive]::LocalMachine,
-            [Microsoft.Win32.RegistryView]::Registry64
-        )
-        $key = $baseKey.OpenSubKey($script:RegistrySubKey, $true)
-        if ($null -eq $key) { throw 'Could not open Drivers32 for writing.' }
-        $key.DeleteValue($script:RegistryValueName, $true)
-    }
-    finally {
-        if ($key) { $key.Dispose() }
-        if ($baseKey) { $baseKey.Dispose() }
-    }
-    $actual = Get-RegistrySnapshot
-    if ($actual.Present) { throw 'The GS Synth registration remained after the temporary delete.' }
+    Invoke-WithDrivers32 $true { param($key) $key.DeleteValue($script:RegistryValueName, $true) }
+    if ((Get-RegistrySnapshot).Present) { throw 'The GS Synth registration remained after the temporary delete.' }
 }
 
 function Restore-GsSynthRegistration {
@@ -331,43 +313,65 @@ function Restore-GsSynthRegistration {
     Assert-WorkaroundState $State
     $current = Get-RegistrySnapshot
     if ($current.Present) {
-        if (([string]$current.Value).Equals($script:ExpectedValue, [StringComparison]::OrdinalIgnoreCase) -and [string]$current.Kind -eq $script:ExpectedKind) {
-            return
+        if (([string]$current.Value).Equals($script:ExpectedValue, [StringComparison]::OrdinalIgnoreCase) -and
+            [string]$current.Kind -eq $script:ExpectedKind) { return }
+        throw ('Refusing to overwrite a different Drivers32 midi value: {0} ({1}).' -f $current.Value, $current.Kind)
+    }
+    Invoke-WithDrivers32 $true {
+        param($key)
+        $key.SetValue($script:RegistryValueName, $script:ExpectedValue, [Microsoft.Win32.RegistryValueKind]::String)
+    }
+    Assert-ExpectedBaseline (Get-RegistrySnapshot)
+}
+
+function Get-MidiDevicesInProcess {
+    if (-not ('EqlAudioFix.NativeMethods' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+namespace EqlAudioFix {
+    public static class NativeMethods {
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        public struct MIDIOUTCAPS {
+            public ushort wMid; public ushort wPid; public uint vDriverVersion;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string szPname;
+            public ushort wTechnology; public ushort wVoices; public ushort wNotes;
+            public ushort wChannelMask; public uint dwSupport;
         }
-        throw ('Refusing to overwrite a different current {0}\{1} value ({2}, {3}).' -f $script:RegistryDisplayPath, $script:RegistryValueName, $current.Value, $current.Kind)
+        [DllImport("winmm.dll")] private static extern uint midiOutGetNumDevs();
+        [DllImport("winmm.dll", CharSet = CharSet.Unicode)]
+        private static extern uint midiOutGetDevCapsW(UIntPtr id, out MIDIOUTCAPS caps, uint size);
+        public static object[] Enumerate() {
+            var rows = new List<object>(); uint count = midiOutGetNumDevs();
+            uint size = (uint)Marshal.SizeOf(typeof(MIDIOUTCAPS));
+            for (uint i = 0; i < count; i++) {
+                MIDIOUTCAPS caps; uint result = midiOutGetDevCapsW((UIntPtr)i, out caps, size);
+                rows.Add(new { id = i, name = caps.szPname ?? "", result = result });
+            }
+            return rows.ToArray();
+        }
     }
+}
+'@
+    }
+    return @([EqlAudioFix.NativeMethods]::Enumerate())
+}
 
-    $baseKey = $null
-    $key = $null
-    try {
-        $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
-            [Microsoft.Win32.RegistryHive]::LocalMachine,
-            [Microsoft.Win32.RegistryView]::Registry64
-        )
-        $key = $baseKey.OpenSubKey($script:RegistrySubKey, $true)
-        if ($null -eq $key) { throw 'Could not open Drivers32 for restoration.' }
-        $key.SetValue(
-            $script:RegistryValueName,
-            $script:ExpectedValue,
-            [Microsoft.Win32.RegistryValueKind]::String
-        )
-    }
-    finally {
-        if ($key) { $key.Dispose() }
-        if ($baseKey) { $baseKey.Dispose() }
-    }
-
-    $verified = Get-RegistrySnapshot
-    Assert-ExpectedBaseline $verified
+function Write-MidiProbeJson {
+    if (-not [Environment]::Is64BitProcess) { throw 'MIDI probe requires 64-bit Windows PowerShell.' }
+    [ordered]@{
+        schema = 'eql-midi-probe-v1'
+        processBitness = if ([Environment]::Is64BitProcess) { 64 } else { 32 }
+        devices = @(Get-MidiDevicesInProcess)
+    } | ConvertTo-Json -Depth 5 -Compress
 }
 
 function Invoke-MidiProbe {
-    if (-not (Test-Path -LiteralPath $script:ProbePath -PathType Leaf)) {
-        throw ('MIDI probe is missing: ' + $script:ProbePath)
-    }
+    if (-not $script:RuntimeSha256) { throw 'Runtime script identity is not initialized.' }
     $startInfo = New-Object Diagnostics.ProcessStartInfo
     $startInfo.FileName = $script:PowerShellExe
-    $startInfo.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' + (Quote-ProcessArgument $script:ProbePath)
+    $startInfo.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File {0} -Mode Probe -ExpectedScriptSha256 {1}' -f (Quote-ProcessArgument $script:RuntimePath), $script:RuntimeSha256
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
@@ -381,16 +385,15 @@ function Invoke-MidiProbe {
         try { $process.Kill() } catch { }
         throw 'The fresh-process MIDI probe timed out.'
     }
-    if ($process.ExitCode -ne 0) {
-        throw ('The fresh-process MIDI probe failed: ' + $stderr.Trim())
-    }
+    $process.WaitForExit()
+    $process.Refresh()
+    if ($process.ExitCode -ne 0) { throw ('The fresh-process MIDI probe failed: ' + $stderr.Trim()) }
     try {
         $result = $stdout | ConvertFrom-Json
+        if ([int]$result.processBitness -ne 64) { throw 'The MIDI probe did not run as a 64-bit process.' }
         return @($result.devices)
     }
-    catch {
-        throw ('The MIDI probe returned invalid JSON: ' + $stdout.Trim())
-    }
+    catch { throw ('The MIDI probe returned invalid output: ' + $_.Exception.Message) }
 }
 
 function Get-DeviceNames {
@@ -481,6 +484,59 @@ function Assert-OfficialLaunchPad {
     }
 }
 
+function Get-ProcessIntegrityRid {
+    param([int]$ProcessId)
+    if (-not ('EqlAudioFix.ProcessSecurity' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+namespace EqlAudioFix {
+    public static class ProcessSecurity {
+        [StructLayout(LayoutKind.Sequential)] struct SID_AND_ATTRIBUTES { public IntPtr Sid; public uint Attributes; }
+        [StructLayout(LayoutKind.Sequential)] struct TOKEN_MANDATORY_LABEL { public SID_AND_ATTRIBUTES Label; }
+        [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+        [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+        [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetTokenInformation(IntPtr token, int infoClass, IntPtr info, int length, out int returnLength);
+        [DllImport("advapi32.dll")] static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
+        [DllImport("advapi32.dll")] static extern IntPtr GetSidSubAuthority(IntPtr sid, uint index);
+        [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+        public static int GetIntegrityRid(int pid) {
+            IntPtr process = OpenProcess(0x1000, false, pid), token = IntPtr.Zero, buffer = IntPtr.Zero;
+            if (process == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+            try {
+                if (!OpenProcessToken(process, 0x0008, out token)) throw new Win32Exception(Marshal.GetLastWin32Error());
+                int length; GetTokenInformation(token, 25, IntPtr.Zero, 0, out length);
+                if (Marshal.GetLastWin32Error() != 122 || length <= 0) throw new Win32Exception(Marshal.GetLastWin32Error());
+                buffer = Marshal.AllocHGlobal(length);
+                if (!GetTokenInformation(token, 25, buffer, length, out length)) throw new Win32Exception(Marshal.GetLastWin32Error());
+                var label = (TOKEN_MANDATORY_LABEL)Marshal.PtrToStructure(buffer, typeof(TOKEN_MANDATORY_LABEL));
+                byte count = Marshal.ReadByte(GetSidSubAuthorityCount(label.Label.Sid));
+                if (count == 0) throw new InvalidOperationException("Integrity SID has no subauthorities.");
+                return Marshal.ReadInt32(GetSidSubAuthority(label.Label.Sid, (uint)(count - 1)));
+            }
+            finally {
+                if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+                if (token != IntPtr.Zero) CloseHandle(token);
+                CloseHandle(process);
+            }
+        }
+    }
+}
+'@
+    }
+    return [EqlAudioFix.ProcessSecurity]::GetIntegrityRid($ProcessId)
+}
+
+function Assert-MediumIntegrityProcess {
+    param([int]$ProcessId)
+    $rid = Get-ProcessIntegrityRid $ProcessId
+    if ($rid -lt 0x2000 -or $rid -ge 0x3000) {
+        throw ('Process PID {0} is not running at normal medium integrity (RID 0x{1:X}).' -f $ProcessId, $rid)
+    }
+    return $rid
+}
+
 function Get-LaunchPadProcessRecords {
     $records = New-Object Collections.Generic.List[object]
     foreach ($process in Get-Process -Name LaunchPad -ErrorAction SilentlyContinue) {
@@ -500,7 +556,8 @@ function Assert-MatchingLaunchPadRunning {
     if (-not ([string]$records[0].Path).Equals($ApprovedPath, [StringComparison]::OrdinalIgnoreCase)) {
         throw ('The open LaunchPad process path does not match the approved signed file: ' + [string]$records[0].Path)
     }
-    return $records[0]
+    $rid = Assert-MediumIntegrityProcess $records[0].Id
+    return [pscustomobject]@{ Id = $records[0].Id; Path = $records[0].Path; IntegrityRid = $rid }
 }
 
 function Start-OrUseOfficialLaunchPad {
@@ -514,7 +571,7 @@ function Start-OrUseOfficialLaunchPad {
     while ((Get-Date) -lt $deadline) {
         $records = @(Get-LaunchPadProcessRecords)
         if ($records.Count -eq 1 -and ([string]$records[0].Path).Equals($ApprovedPath, [StringComparison]::OrdinalIgnoreCase)) {
-            return $records[0]
+            return Assert-MatchingLaunchPadRunning $ApprovedPath
         }
         if ($records.Count -gt 0) {
             throw 'A LaunchPad process opened from a path other than the approved signed file.'
@@ -522,23 +579,6 @@ function Start-OrUseOfficialLaunchPad {
         Start-Sleep -Milliseconds 250
     }
     throw 'The approved signed LaunchPad did not open within 30 seconds.'
-}
-
-function Get-SavedLaunchPadPath {
-    if (-not (Test-Path -LiteralPath $script:ConfigPath -PathType Leaf)) { return $null }
-    try {
-        $config = Get-Content -LiteralPath $script:ConfigPath -Raw | ConvertFrom-Json
-        return Test-LaunchPadCandidate ([string]$config.LaunchPadPath)
-    }
-    catch { return $null }
-}
-
-function Save-LaunchPadPath {
-    param([string]$Path)
-    Write-JsonAtomic $script:ConfigPath ([ordered]@{
-        Schema = 'eql-gs-synth-workaround-config-v1'
-        LaunchPadPath = $Path
-    })
 }
 
 function Get-KnownLaunchPadCandidates {
@@ -585,8 +625,6 @@ function Select-LaunchPadInteractively {
 function Resolve-LaunchPadPath {
     param([string]$ExplicitPath, [bool]$AllowPrompt)
     $candidate = Test-LaunchPadCandidate $ExplicitPath
-    if ($candidate) { return $candidate }
-    $candidate = Get-SavedLaunchPadPath
     if ($candidate) { return $candidate }
     $known = @(Get-KnownLaunchPadCandidates)
     if ($known.Count -eq 1) { return $known[0] }
@@ -655,33 +693,34 @@ function Wait-ForEqlInitialization {
 
 function Start-RestorationWatchdog {
     param([string]$StatePath, [string]$Folder)
-    if (-not (Test-Path -LiteralPath $script:WatchdogPath -PathType Leaf)) {
-        throw ('Restoration watchdog is missing: ' + $script:WatchdogPath)
-    }
+    if (-not (Test-Path -LiteralPath $script:RuntimePath -PathType Leaf)) { throw ('Runtime script is missing: ' + $script:RuntimePath) }
     $readyPath = Join-Path $Folder 'watchdog.ready.json'
     if (Test-Path -LiteralPath $readyPath) { [IO.File]::Delete($readyPath) }
-    $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File {0} -StatePath {1} -ReadyPath {2}' -f `
-        (Quote-ProcessArgument $script:WatchdogPath), `
-        (Quote-ProcessArgument $StatePath), `
-        (Quote-ProcessArgument $readyPath)
-    $process = Start-Process -FilePath $script:PowerShellExe -ArgumentList $arguments -WindowStyle Hidden -PassThru `
-        -RedirectStandardOutput (Join-Path $Folder 'watchdog.stdout.log') `
-        -RedirectStandardError (Join-Path $Folder 'watchdog.stderr.log')
+    $arguments = ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File {0} -Mode Watchdog -StatePath {1} -ReadyPath {2} -ExpectedScriptSha256 {3}' -f
+        (Quote-ProcessArgument $script:RuntimePath),
+        (Quote-ProcessArgument $StatePath),
+        (Quote-ProcessArgument $readyPath),
+        $script:RuntimeSha256)
+    $watchdogOptions = @{
+        FilePath = $script:PowerShellExe
+        ArgumentList = $arguments
+        WindowStyle = 'Hidden'
+        PassThru = $true
+        RedirectStandardOutput = (Join-Path $Folder 'watchdog.stdout.log')
+        RedirectStandardError = (Join-Path $Folder 'watchdog.stderr.log')
+    }
+    $process = Start-Process @watchdogOptions
     $deadline = (Get-Date).AddSeconds(10)
     while ((Get-Date) -lt $deadline) {
         $process.Refresh()
-        if ($process.HasExited) {
-            throw ('Restoration watchdog exited before readiness with code ' + $process.ExitCode + '.')
-        }
+        if ($process.HasExited) { throw ('Restoration watchdog exited before readiness with code ' + $process.ExitCode + '.') }
         if (Test-Path -LiteralPath $readyPath -PathType Leaf) {
             try {
                 $ready = Get-Content -LiteralPath $readyPath -Raw | ConvertFrom-Json
-                $expectedStatePath = [IO.Path]::GetFullPath($StatePath)
                 if ([string]$ready.Schema -eq 'eql-gs-synth-watchdog-ready-v1' -and
                     [int]$ready.WatchdogPid -eq [int]$process.Id -and
-                    ([string]$ready.StatePath).Equals($expectedStatePath, [StringComparison]::OrdinalIgnoreCase)) {
-                    return $process
-                }
+                    ([string]$ready.StatePath).Equals([IO.Path]::GetFullPath($StatePath), [StringComparison]::OrdinalIgnoreCase) -and
+                    ([string]$ready.ScriptSha256).Equals($script:RuntimeSha256, [StringComparison]::OrdinalIgnoreCase)) { return $process }
             }
             catch { }
         }
@@ -689,6 +728,61 @@ function Start-RestorationWatchdog {
     }
     try { $process.Kill() } catch { }
     throw 'Restoration watchdog did not acknowledge readiness within 10 seconds; no registry change was made.'
+}
+
+function Invoke-Watchdog {
+    if (-not $StatePath -or -not $ReadyPath) { throw 'Watchdog state and ready paths are required.' }
+    $state = Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json
+    Assert-WorkaroundState $state
+    $stateDirectory = [IO.Path]::GetFullPath((Split-Path -Parent $StatePath)).TrimEnd('\')
+    $readyDirectory = [IO.Path]::GetFullPath((Split-Path -Parent $ReadyPath)).TrimEnd('\')
+    if (-not $stateDirectory.Equals($readyDirectory, [StringComparison]::OrdinalIgnoreCase)) { throw 'Watchdog ready path must share the transaction directory.' }
+    if ($state.PSObject.Properties['RuntimeScriptSha256'] -and [string]$state.RuntimeScriptSha256 -and
+        -not ([string]$state.RuntimeScriptSha256).Equals($script:RuntimeSha256, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Watchdog state is bound to a different runtime script hash.'
+    }
+    Write-JsonAtomic $ReadyPath ([ordered]@{
+        Schema = 'eql-gs-synth-watchdog-ready-v1'; WatchdogPid = $PID
+        StatePath = [IO.Path]::GetFullPath($StatePath); ScriptSha256 = $script:RuntimeSha256
+        ReadyAtUtc = [DateTime]::UtcNow.ToString('o')
+    })
+    while ($true) {
+        $parentAlive = $false
+        $parent = Get-Process -Id ([int]$state.ParentPid) -ErrorAction SilentlyContinue
+        if ($parent) {
+            try { $parentAlive = $parent.StartTime.ToUniversalTime().ToString('o') -eq [string]$state.ParentStartTimeUtc }
+            catch { $parentAlive = $false }
+        }
+        $expired = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() -ge [int64]$state.DeadlineEpoch
+        $inactive = $false
+        try {
+            $current = Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json
+            Assert-WorkaroundState $current
+            $inactive = -not [bool]$current.Active
+            $state = $current
+        }
+        catch { }
+        if ($inactive -or -not $parentAlive -or $expired) { break }
+        Start-Sleep -Seconds 1
+    }
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 60; $attempt++) {
+        try {
+            Restore-GsSynthRegistration $state
+            $names = @(Get-DeviceNames @(Invoke-MidiProbe))
+            if (-not ($names | Where-Object { $_.Equals($script:GsSynthName, [StringComparison]::OrdinalIgnoreCase) })) {
+                throw 'GS Synth did not freshly enumerate after watchdog restoration.'
+            }
+            $state.Active = $false
+            $state | Add-Member -NotePropertyName WatchdogRestored -NotePropertyValue $true -Force
+            $state | Add-Member -NotePropertyName WatchdogRestoredAtUtc -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force
+            Write-JsonAtomic $StatePath $state
+            Write-Output 'PASS: watchdog verified exact GS Synth restoration.'
+            return
+        }
+        catch { $lastError = $_.Exception; Start-Sleep -Seconds 1 }
+    }
+    throw ('Watchdog could not verify GS Synth restoration: ' + $lastError.Message)
 }
 
 function Invoke-StaleRecovery {
@@ -729,175 +823,37 @@ function Invoke-StaleRecovery {
 }
 
 function Invoke-DryRun {
-    if (-not [Environment]::Is64BitOperatingSystem) { throw 'This workaround is only for 64-bit Windows.' }
-    foreach ($required in @($script:ProbePath, $script:WatchdogPath)) {
-        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw ('Required package file is missing: ' + $required) }
-    }
-    $helperHashes = Assert-HelperSourceIntegrity
+    if (-not [Environment]::Is64BitOperatingSystem -or -not [Environment]::Is64BitProcess) { throw 'This workaround requires 64-bit Windows PowerShell on 64-bit Windows.' }
+    $callerIntegrityRid = Assert-MediumIntegrityProcess $PID
+    $scriptHash = Assert-ScriptIdentity $ExpectedScriptSha256
     $launchPad = Resolve-LaunchPadPath $LaunchPadPath $false
-    $launchPadDetails = $null
-    if ($launchPad) { $launchPadDetails = Assert-OfficialLaunchPad $launchPad }
+    $launchPadDetails = if ($launchPad) { Assert-OfficialLaunchPad $launchPad } else { $null }
     $snapshot = Get-RegistrySnapshot
     Assert-ExpectedBaseline $snapshot
-    $devices = @(Invoke-MidiProbe)
-    $names = @(Get-DeviceNames $devices)
+    $names = @(Get-DeviceNames @(Invoke-MidiProbe))
     $gsPresent = [bool]($names | Where-Object { $_.Equals($script:GsSynthName, [StringComparison]::OrdinalIgnoreCase) })
     if (-not $gsPresent) { throw 'Microsoft GS Wavetable Synth is not freshly enumerable at baseline.' }
-    $report = [ordered]@{
-        Schema = 'eql-gs-synth-workaround-dry-run-v1'
-        Version = $script:Version
-        Mutated = $false
-        IsAdministrator = Test-IsAdministrator
-        LaunchPadPath = $launchPad
-        LaunchPadFound = [bool]$launchPad
+    [ordered]@{
+        Schema = 'eql-gs-synth-workaround-dry-run-v1'; Version = $script:Version; Mutated = $false
+        IsAdministrator = Test-IsAdministrator; CallerIntegrityRid = $callerIntegrityRid; LaunchPadPath = $launchPad; LaunchPadFound = [bool]$launchPad
         LaunchPadSignatureValid = [bool]$launchPadDetails
         LaunchPadSigner = if ($launchPadDetails) { $launchPadDetails.SignerSubject } else { $null }
-        HelperSha256 = $helperHashes
-        RegistryPath = $script:RegistryDisplayPath
-        RegistryValueName = $script:RegistryValueName
-        RegistryValue = $snapshot.Value
-        RegistryKind = $snapshot.Kind
-        GsSynthPresent = $gsPresent
-        MidiOutputs = $names
+        ScriptSha256 = $scriptHash; RegistryPath = $script:RegistryDisplayPath
+        RegistryValueName = $script:RegistryValueName; RegistryValue = $snapshot.Value; RegistryKind = $snapshot.Kind
+        GsSynthPresent = $gsPresent; MidiOutputs = $names
         EqgameRunning = [bool](Get-Process -Name eqgame -ErrorAction SilentlyContinue)
         LaunchPadRunning = [bool](Get-Process -Name LaunchPad -ErrorAction SilentlyContinue)
-    }
-    Write-Host ($report | ConvertTo-Json -Depth 6)
-    if (-not $launchPad) {
-        Write-Status 'Dry run passed for the fault-path checks, but LaunchPad.exe was not auto-detected. The live run will open a file picker.' 'WARN'
-    }
-    else {
-        Write-Status 'Dry run passed. No registry, audio, game, service, or Wave Link state was changed.' 'PASS'
-    }
-}
-
-function Invoke-SelfTest {
-    $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('eql-gs-selftest-' + [Guid]::NewGuid().ToString('N'))
-    [IO.Directory]::CreateDirectory($temporaryRoot) | Out-Null
-    Enter-WorkaroundMutex
-    try {
-        if (-not $script:OwnsInstanceMutex) { throw 'Single-instance mutex self-test failed.' }
-        $validState = [pscustomobject]@{
-            Schema = 'eql-gs-synth-workaround-state-v1'
-            RegistryPath = $script:RegistryDisplayPath
-            RegistryView = 'Registry64'
-            ValueName = $script:RegistryValueName
-            OriginalPresent = $true
-            OriginalValue = $script:ExpectedValue
-            OriginalKind = $script:ExpectedKind
-        }
-        Assert-WorkaroundState $validState
-        $rejected = $false
-        try {
-            $invalid = $validState.PSObject.Copy()
-            $invalid.RegistryPath = 'HKLM\SOFTWARE\NotApproved'
-            Assert-WorkaroundState $invalid
-        }
-        catch { $rejected = $true }
-        if (-not $rejected) { throw 'State allow-list self-test failed.' }
-
-        $before = @('USB MIDI', $script:GsSynthName, 'loopMIDI')
-        $after = @('USB MIDI', 'loopMIDI')
-        if (-not (Test-IsolationDelta $before $after)) { throw 'MIDI isolation delta self-test failed.' }
-        if (Test-IsolationDelta $before @('USB MIDI')) { throw 'MIDI collateral-loss self-test failed.' }
-        if (-not (Test-RestoredDevices $before $before)) { throw 'MIDI restoration self-test failed.' }
-        if (Test-RestoredDevices @('Duplicate', 'Duplicate', $script:GsSynthName) @('Duplicate', $script:GsSynthName)) {
-            throw 'MIDI duplicate-count restoration self-test failed.'
-        }
-        if ((Get-InitializationStatus 'Sound Manager loaded 5000 filenames') -ne 'SoundManager') { throw 'Sound marker self-test failed.' }
-        if ((Get-InitializationStatus 'Sound Manager loaded; Fatal error occurred in mainthread') -ne 'Fatal') { throw 'Fatal precedence self-test failed.' }
-        if ((Get-InitializationStatus 'Initializing character select UI.') -ne 'Ready') { throw 'Ready marker self-test failed.' }
-
-        $jsonPath = Join-Path $temporaryRoot 'state.json'
-        Write-JsonAtomic $jsonPath $validState
-        Write-JsonAtomic $jsonPath $validState
-        $roundTrip = Get-Content -LiteralPath $jsonPath -Raw | ConvertFrom-Json
-        Assert-WorkaroundState $roundTrip
-
-        $dummyLaunchPad = Join-Path $temporaryRoot 'LaunchPad.exe'
-        [IO.File]::WriteAllBytes($dummyLaunchPad, [byte[]](0))
-        $resolved = Test-LaunchPadCandidate $dummyLaunchPad
-        if ($resolved -ne [IO.Path]::GetFullPath($dummyLaunchPad)) { throw 'LaunchPad resolver self-test failed.' }
-        $unsignedRejected = $false
-        try { [void](Assert-OfficialLaunchPad $dummyLaunchPad) }
-        catch { $unsignedRejected = $true }
-        if (-not $unsignedRejected) { throw 'Unsigned LaunchPad rejection self-test failed.' }
-
-        $protectedAcl = New-ProtectedDirectorySecurity
-        $ownerSid = $protectedAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value
-        $rules = @($protectedAcl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]))
-        if ($ownerSid -ne 'S-1-5-32-544' -or $rules.Count -ne 3 -or -not $protectedAcl.AreAccessRulesProtected) {
-            throw 'Protected ProgramData ACL builder self-test failed.'
-        }
-        $helperHashes = Assert-HelperSourceIntegrity
-        if ($helperHashes.Probe -ne $script:ExpectedProbeSha256 -or $helperHashes.Watchdog -ne $script:ExpectedWatchdogSha256) {
-            throw 'Hash-pinned helper integrity self-test failed.'
-        }
-
-        $watchdogRegistryBefore = Get-RegistrySnapshot
-        Assert-ExpectedBaseline $watchdogRegistryBefore
-        $watchdogStatePath = Join-Path $temporaryRoot 'watchdog-state.json'
-        $watchdogState = [ordered]@{
-            Schema = 'eql-gs-synth-workaround-state-v1'
-            Version = $script:Version
-            Active = $true
-            ParentPid = $PID
-            ParentStartTimeUtc = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o')
-            DeadlineEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() + 60
-            RegistryPath = $script:RegistryDisplayPath
-            RegistryView = 'Registry64'
-            ValueName = $script:RegistryValueName
-            OriginalPresent = $true
-            OriginalValue = $script:ExpectedValue
-            OriginalKind = $script:ExpectedKind
-            WatchdogPid = 0
-        }
-        Write-JsonAtomic $watchdogStatePath $watchdogState
-        $watchdogProcess = Start-RestorationWatchdog $watchdogStatePath $temporaryRoot
-        $watchdogState.WatchdogPid = [int]$watchdogProcess.Id
-        $watchdogState.Active = $false
-        Write-JsonAtomic $watchdogStatePath $watchdogState
-        if (-not $watchdogProcess.WaitForExit(15000)) {
-            try { $watchdogProcess.Kill() } catch { }
-            throw 'Watchdog lifecycle self-test timed out.'
-        }
-        $watchdogProcess.WaitForExit()
-        $watchdogProcess.Refresh()
-        $watchdogExitCode = [int]$watchdogProcess.ExitCode
-        if ($watchdogExitCode -ne 0) { throw ('Watchdog lifecycle self-test exited ' + $watchdogExitCode + '.') }
-        $watchdogReceipt = Get-Content -LiteralPath $watchdogStatePath -Raw | ConvertFrom-Json
-        $watchdogReady = Get-Content -LiteralPath (Join-Path $temporaryRoot 'watchdog.ready.json') -Raw | ConvertFrom-Json
-        if ([string]$watchdogReady.Schema -ne 'eql-gs-synth-watchdog-ready-v1' -or
-            [int]$watchdogReady.WatchdogPid -ne [int]$watchdogProcess.Id -or
-            -not [bool]$watchdogReceipt.WatchdogRestored -or
-            [bool]$watchdogReceipt.Active) {
-            throw 'Watchdog readiness/restoration receipt self-test failed.'
-        }
-        $watchdogRegistryAfter = Get-RegistrySnapshot
-        if ($watchdogRegistryBefore.Present -ne $watchdogRegistryAfter.Present -or
-            [string]$watchdogRegistryBefore.Value -ne [string]$watchdogRegistryAfter.Value -or
-            [string]$watchdogRegistryBefore.Kind -ne [string]$watchdogRegistryAfter.Kind) {
-            throw 'Watchdog self-test changed the restored registry baseline.'
-        }
-
-        Write-Status 'Self-test passed: state allow-list, collateral detection, log gates, atomic state, signed-launcher rejection, protected ACL construction, hash-pinned helpers, watchdog ready/restore lifecycle, path resolution, and single-instance guard.' 'PASS'
-    }
-    finally {
-        Exit-WorkaroundMutex
-        Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
-    }
+    } | ConvertTo-Json -Depth 6 | Write-Host
+    if ($launchPad) { Write-Status 'Compatibility check passed. No registry, audio, game, service, or Wave Link state was changed.' 'PASS' }
+    else { Write-Status 'Fault-path checks passed, but LaunchPad was not auto-detected. Launch mode will open a file picker.' 'WARN' }
 }
 
 function Invoke-LiveWorkaround {
     if (-not [Environment]::Is64BitOperatingSystem) { throw 'This workaround is only for 64-bit Windows.' }
     if (-not (Test-IsAdministrator)) { throw 'The live workaround is not running as administrator.' }
     if (Get-Process -Name eqgame -ErrorAction SilentlyContinue) { throw 'eqgame.exe is already running. Close EQL before using this launcher.' }
-    foreach ($required in @($script:ProbePath, $script:WatchdogPath)) {
-        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw ('Required package file is missing: ' + $required) }
-    }
-
     Initialize-ProtectedBackupRoot
-    Stage-ProtectedRuntimeHelpers
+    [void](Stage-ProtectedRuntimeScript $ExpectedScriptSha256)
     [void](Invoke-StaleRecovery)
 
     $launchPad = Resolve-LaunchPadPath $LaunchPadPath $false
@@ -951,6 +907,7 @@ function Invoke-LiveWorkaround {
         LaunchPadSignerThumbprint = [string]$launchPadDetails.SignerThumbprint
         LaunchPadFileVersion = [string]$launchPadDetails.FileVersion
         WatchdogPid = 0
+        RuntimeScriptSha256 = $script:RuntimeSha256
         IsolatedMidiOutputs = @()
         IsolatedAtUtc = $null
         Outcome = 'pending'
@@ -1032,44 +989,57 @@ function Invoke-LiveWorkaround {
 
 $exitCode = 0
 try {
-    if ($SelfTest) {
-        Invoke-SelfTest
-    }
-    elseif ($DryRun) {
-        Invoke-DryRun
-    }
-    elseif (-not (Test-IsAdministrator)) {
-        if (-not $RecoverOnly) {
-            if (Get-Process -Name eqgame -ErrorAction SilentlyContinue) {
-                throw 'eqgame.exe is already running. Close EQL before using this launcher.'
+    switch ($Mode) {
+        'Probe' {
+            [void](Assert-ScriptIdentity $ExpectedScriptSha256)
+            Write-MidiProbeJson
+        }
+        'Watchdog' {
+            [void](Assert-ScriptIdentity $ExpectedScriptSha256)
+            Invoke-Watchdog
+        }
+        'Check' {
+            [void](Assert-ScriptIdentity $ExpectedScriptSha256)
+            Invoke-DryRun
+        }
+        'Recover' {
+            if (-not (Test-IsAdministrator)) { $exitCode = Invoke-ElevatedCopy 'Recover'; break }
+            if (-not (Get-TrustedSourceBytes)) { throw 'Recover mode requires the hash-verifying elevated bootstrap.' }
+            [void](Assert-ScriptIdentity $ExpectedScriptSha256)
+            Enter-WorkaroundMutex
+            try {
+                Initialize-ProtectedBackupRoot
+                [void](Stage-ProtectedRuntimeScript $script:RuntimeSha256)
+                [void](Invoke-StaleRecovery)
             }
+            finally { Exit-WorkaroundMutex }
+        }
+        'Elevated' {
+            if (-not (Test-IsAdministrator)) { throw 'Elevated mode requires administrator rights.' }
+            if (-not (Get-TrustedSourceBytes)) { throw 'Elevated mode requires the hash-verifying bootstrap.' }
+            [void](Assert-ScriptIdentity $ExpectedScriptSha256)
+            Enter-WorkaroundMutex
+            try { Invoke-LiveWorkaround }
+            finally { Exit-WorkaroundMutex }
+        }
+        'Launch' {
+            if (Test-IsAdministrator) { throw 'Run the CMD launcher normally; it requests UAC only after opening LaunchPad.' }
+            [void](Assert-ScriptIdentity $ExpectedScriptSha256)
+            Invoke-DryRun
+            if (Get-Process -Name eqgame -ErrorAction SilentlyContinue) { throw 'eqgame.exe is already running. Close EQL first.' }
             $approvedPath = Resolve-LaunchPadPath $LaunchPadPath $true
             if (-not $approvedPath) { throw 'The official EverQuest Legends LaunchPad.exe was not selected.' }
-            $approvedDetails = Assert-OfficialLaunchPad $approvedPath
-            Save-LaunchPadPath $approvedPath
+            [void](Assert-OfficialLaunchPad $approvedPath)
             $normalLaunchPad = Start-OrUseOfficialLaunchPad $approvedPath
-            Write-Status ('Verified signed Daybreak LaunchPad and opened it before UAC at normal user integrity (PID {0}).' -f $normalLaunchPad.Id) 'PASS'
+            Write-Status ('Verified and opened signed Daybreak LaunchPad at medium integrity before UAC (PID {0}, RID 0x{1:X}).' -f $normalLaunchPad.Id, $normalLaunchPad.IntegrityRid) 'PASS'
             $LaunchPadPath = $approvedPath
+            $exitCode = Invoke-ElevatedCopy 'Elevated'
         }
-        $exitCode = Invoke-ElevatedCopy
-    }
-    elseif ($RecoverOnly) {
-        Enter-WorkaroundMutex
-        try {
-            Initialize-ProtectedBackupRoot
-            Stage-ProtectedRuntimeHelpers
-            [void](Invoke-StaleRecovery)
-        }
-        finally { Exit-WorkaroundMutex }
-    }
-    else {
-        Enter-WorkaroundMutex
-        try { Invoke-LiveWorkaround }
-        finally { Exit-WorkaroundMutex }
     }
 }
 catch {
-    Write-Status $_.Exception.Message 'ERROR'
+    if ($Mode -in @('Probe', 'Watchdog')) { [Console]::Error.WriteLine($_.Exception.Message) }
+    else { Write-Status $_.Exception.Message 'ERROR' }
     $exitCode = 1
 }
 exit $exitCode
