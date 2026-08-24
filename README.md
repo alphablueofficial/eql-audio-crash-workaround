@@ -13,7 +13,7 @@ This is intended for players who can reach server select but crash during audio 
 
 ## Download and use
 
-1. Download the latest ZIP from [Releases](https://github.com/alphablueofficial/eql-audio-crash-workaround/releases/latest) and extract the whole folder.
+1. Download the newest ZIP from [Releases](https://github.com/alphablueofficial/eql-audio-crash-workaround/releases) and extract the whole folder.
 2. Close EQL and LaunchPad.
 3. Double-click **`Launch EQL Audio Fix.cmd`**.
 4. Approve the Windows UAC prompt.
