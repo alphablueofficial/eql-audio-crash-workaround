@@ -16,7 +16,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:Version = '1.0.0-rc4'
+$script:Version = '1.0.0-rc5'
 $script:RegistrySubKey = 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Drivers32'
 $script:RegistryDisplayPath = 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Drivers32'
 $script:RegistryValueName = 'midi'
@@ -548,7 +548,7 @@ function Get-LaunchPadProcessRecords {
         try { $path = [string]$process.Path } catch { }
         $records.Add([pscustomobject]@{ Id = [int]$process.Id; Path = $path })
     }
-    return @($records)
+    return $records.ToArray()
 }
 
 function Assert-MatchingLaunchPadRunning {
