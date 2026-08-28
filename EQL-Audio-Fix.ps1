@@ -16,7 +16,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:Version = '1.0.0-rc6'
+$script:Version = '1.0.0-rc7'
 $script:RegistrySubKey = 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Drivers32'
 $script:RegistryDisplayPath = 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Drivers32'
 $script:RegistryValueName = 'midi'
@@ -33,6 +33,9 @@ $script:RuntimeSha256 = ''
 $script:LogFile = $null
 $script:InstanceMutex = $null
 $script:OwnsInstanceMutex = $false
+$script:FinalResultWritten = $false
+$script:LiveTransactionStarted = $false
+$script:LiveRestorationVerified = $false
 
 function Write-Status {
     param([string]$Message, [string]$Level = 'INFO')
@@ -40,6 +43,23 @@ function Write-Status {
     Write-Host $line
     if ($script:LogFile) {
         try { [IO.File]::AppendAllText($script:LogFile, $line + [Environment]::NewLine) } catch { }
+    }
+}
+
+function Write-FinalResult {
+    param([string]$Message, [string]$Level)
+    $script:FinalResultWritten = $true
+    Write-Status $Message $Level
+}
+
+function Write-LaunchResult {
+    param([int]$ExitCode, [string]$Details = '')
+    $suffix = if ([string]::IsNullOrWhiteSpace($Details)) { '' } else { ' Details: ' + $Details }
+    switch ($ExitCode) {
+        0 { Write-FinalResult 'SUCCESS - EQL reached character select and Windows MIDI was fully restored.' 'PASS' }
+        2 { Write-FinalResult ('FAILED - EQL did not reach character select. Windows MIDI was fully restored.' + $suffix) 'ERROR' }
+        3 { Write-FinalResult ('FAILED - Windows MIDI restoration could not be verified. Run Emergency Restore Windows MIDI.cmd.' + $suffix) 'ERROR' }
+        default { Write-FinalResult 'STOPPED - The guarded run did not complete. No temporary change was confirmed; review the elevated error above.' 'ERROR' }
     }
 }
 
@@ -405,31 +425,15 @@ function Get-DeviceNames {
     return @($Devices | ForEach-Object { [string]$_.name })
 }
 
-function Test-IsolationDelta {
-    param([string[]]$Before, [string[]]$After)
+function Test-DeviceNameMultisetEqual {
+    param([string[]]$Expected, [string[]]$Actual)
+    if ($Expected.Count -ne $Actual.Count) { return $false }
     $remaining = New-Object Collections.Generic.List[string]
-    foreach ($name in $Before) { $remaining.Add([string]$name) }
-    $matches = @($remaining | Where-Object { $_.Equals($script:GsSynthName, [StringComparison]::OrdinalIgnoreCase) })
-    if ($matches.Count -ne 1) { return $false }
-    for ($index = 0; $index -lt $remaining.Count; $index++) {
-        if ($remaining[$index].Equals($script:GsSynthName, [StringComparison]::OrdinalIgnoreCase)) {
-            $remaining.RemoveAt($index)
-            break
-        }
-    }
-    $expected = @($remaining | Sort-Object)
-    $actual = @($After | Sort-Object)
-    return -not [bool](Compare-Object -ReferenceObject $expected -DifferenceObject $actual)
-}
-
-function Test-RestoredDevices {
-    param([string[]]$Before, [string[]]$After)
-    $remaining = New-Object Collections.Generic.List[string]
-    foreach ($name in $After) { $remaining.Add([string]$name) }
-    foreach ($expected in $Before) {
+    foreach ($name in $Actual) { $remaining.Add([string]$name) }
+    foreach ($expectedName in $Expected) {
         $found = -1
         for ($index = 0; $index -lt $remaining.Count; $index++) {
-            if ($remaining[$index].Equals($expected, [StringComparison]::OrdinalIgnoreCase)) {
+            if ($remaining[$index].Equals($expectedName, [StringComparison]::OrdinalIgnoreCase)) {
                 $found = $index
                 break
             }
@@ -437,7 +441,22 @@ function Test-RestoredDevices {
         if ($found -lt 0) { return $false }
         $remaining.RemoveAt($found)
     }
-    return [bool]($After | Where-Object { $_.Equals($script:GsSynthName, [StringComparison]::OrdinalIgnoreCase) })
+    return $remaining.Count -eq 0
+}
+
+function Test-IsolationDelta {
+    param([string[]]$Before, [string[]]$After)
+    $expected = New-Object Collections.Generic.List[string]
+    foreach ($name in $Before) { $expected.Add([string]$name) }
+    $matches = @($expected | Where-Object { $_.Equals($script:GsSynthName, [StringComparison]::OrdinalIgnoreCase) })
+    if ($matches.Count -ne 1) { return $false }
+    for ($index = 0; $index -lt $expected.Count; $index++) {
+        if ($expected[$index].Equals($script:GsSynthName, [StringComparison]::OrdinalIgnoreCase)) {
+            $expected.RemoveAt($index)
+            break
+        }
+    }
+    return Test-DeviceNameMultisetEqual -Expected @($expected) -Actual $After
 }
 
 function Export-Drivers32 {
@@ -939,7 +958,9 @@ function Invoke-LiveWorkaround {
 
     $restored = $false
     $outcome = 'failure'
+    $operationError = $null
     try {
+        $script:LiveTransactionStarted = $true
         Remove-GsSynthRegistration
         $isolatedDevices = @(Invoke-MidiProbe)
         $isolatedNames = @(Get-DeviceNames $isolatedDevices)
@@ -955,11 +976,13 @@ function Invoke-LiveWorkaround {
         [void](Assert-OfficialLaunchPad $launchPad)
         [void](Assert-MatchingLaunchPadRunning $launchPad)
         $baselinePids = @(Get-Process -Name eqgame -ErrorAction SilentlyContinue | ForEach-Object { [int]$_.Id })
-        Write-Status 'The signed Daybreak LaunchPad is already open at normal user integrity. Click PLAY normally.'
         $eqgamePid = Wait-ForNewEqgame $baselinePids $LaunchTimeoutSeconds
         Write-Status ('Detected new eqgame.exe PID ' + $eqgamePid + '.')
         Wait-ForEqlInitialization $eqgamePid $debugLogPath $baselineLogText $InitializationTimeoutSeconds
         $outcome = 'success'
+    }
+    catch {
+        $operationError = $_.Exception
     }
     finally {
         $lastRestoreError = $null
@@ -968,8 +991,8 @@ function Invoke-LiveWorkaround {
                 Restore-GsSynthRegistration $state
                 $restoredDevices = @(Invoke-MidiProbe)
                 $restoredNames = @(Get-DeviceNames $restoredDevices)
-                if (-not (Test-RestoredDevices $beforeNames $restoredNames)) {
-                    throw ('Fresh-process restoration verification is incomplete. Baseline={0}; Restored={1}' -f ($beforeNames -join ', '), ($restoredNames -join ', '))
+                if (-not (Test-DeviceNameMultisetEqual -Expected $beforeNames -Actual $restoredNames)) {
+                    throw ('Fresh-process restoration verification did not exactly match the duplicate-aware baseline. Baseline={0}; Restored={1}' -f ($beforeNames -join ', '), ($restoredNames -join ', '))
                 }
                 $state.Active = $false
                 $state.Outcome = $outcome
@@ -978,6 +1001,7 @@ function Invoke-LiveWorkaround {
                 $state.RestoredMidiOutputs = $restoredNames
                 Write-JsonAtomic $statePath $state
                 $restored = $true
+                $script:LiveRestorationVerified = $true
                 Write-Status 'Exact 64-bit midi=wdmaud.drv registration restored; GS Synth is freshly enumerable again.' 'PASS'
                 break
             }
@@ -987,15 +1011,18 @@ function Invoke-LiveWorkaround {
             }
         }
         if (-not $restored) {
-            Write-Status ('CRITICAL RESTORE ERROR: ' + $lastRestoreError.Message) 'ERROR'
+            Write-LaunchResult 3 $folder
+            Write-Status ('Restore error: ' + $lastRestoreError.Message) 'ERROR'
             Write-Status ('Leave this window open briefly; watchdog PID {0} will retry restoration when the parent exits or its deadline expires.' -f $state.WatchdogPid) 'ERROR'
             throw ('The parent could not verify GS Synth restoration: ' + $lastRestoreError.Message)
         }
     }
 
-    if ($outcome -eq 'success') {
-        Write-Status 'EQL passed the guarded initialization boundary and all Windows MIDI state was restored.' 'PASS'
+    if ($operationError) {
+        Write-LaunchResult 2 $folder
+        throw $operationError
     }
+    Write-LaunchResult 0
 }
 
 $exitCode = 0
@@ -1016,9 +1043,11 @@ try {
         }
         'Recover' {
             if (-not (Test-IsAdministrator)) {
-                if (-not (Get-TrustedSourceBytes)) { throw 'Recover mode must start through Restore Windows MIDI.cmd.' }
+                if (-not (Get-TrustedSourceBytes)) { throw 'Recover mode must start through Emergency Restore Windows MIDI.cmd.' }
                 $entrySha256 = Assert-ScriptIdentity $ExpectedScriptSha256
                 $exitCode = Invoke-ElevatedCopy 'Recover' $entrySha256
+                if ($exitCode -eq 0) { Write-FinalResult 'RECOVERY COMPLETE - No recorded active transaction remains.' 'PASS' }
+                else { Write-FinalResult 'RECOVERY STOPPED - Windows MIDI recovery did not complete. Review the elevated error above.' 'ERROR' }
                 break
             }
             if (-not (Get-TrustedSourceBytes)) { throw 'Recover mode requires the hash-verifying elevated bootstrap.' }
@@ -1027,7 +1056,9 @@ try {
             try {
                 Initialize-ProtectedBackupRoot
                 [void](Stage-ProtectedRuntimeScript $script:RuntimeSha256)
-                [void](Invoke-StaleRecovery)
+                $recovered = Invoke-StaleRecovery
+                if ($recovered -gt 0) { Write-FinalResult ('RECOVERY COMPLETE - Restored {0} recorded transaction(s).' -f $recovered) 'PASS' }
+                else { Write-FinalResult 'RECOVERY CHECK COMPLETE - No recorded active transaction required restoration.' 'PASS' }
             }
             finally { Exit-WorkaroundMutex }
         }
@@ -1052,12 +1083,19 @@ try {
             Write-Status ('Verified and opened signed Daybreak LaunchPad at medium integrity before UAC (PID {0}, RID 0x{1:X}).' -f $normalLaunchPad.Id, $normalLaunchPad.IntegrityRid) 'PASS'
             $LaunchPadPath = $approvedPath
             $exitCode = Invoke-ElevatedCopy 'Elevated' $entrySha256
+            Write-LaunchResult $exitCode
         }
     }
 }
 catch {
     if ($Mode -in @('Probe', 'Watchdog')) { [Console]::Error.WriteLine($_.Exception.Message) }
-    else { Write-Status $_.Exception.Message 'ERROR' }
-    $exitCode = 1
+    else {
+        if ($script:FinalResultWritten) { Write-Status ('Reason: ' + $_.Exception.Message) 'ERROR' }
+        else { Write-FinalResult ('STOPPED - ' + $_.Exception.Message) 'ERROR' }
+    }
+    if ($Mode -eq 'Elevated' -and $script:LiveTransactionStarted) {
+        $exitCode = if ($script:LiveRestorationVerified) { 2 } else { 3 }
+    }
+    else { $exitCode = 1 }
 }
 exit $exitCode

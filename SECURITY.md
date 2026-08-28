@@ -23,4 +23,4 @@ Include, when safe:
 
 This is an unsigned community workaround, not an official Daybreak, Game Jawn, Elgato, or Microsoft product. It intentionally fails closed on unknown configurations and does not claim to protect a package that was replaced before the user verified its published release hash.
 
-If Windows MIDI restoration is the immediate concern, run `Restore Windows MIDI.cmd` from the same unmodified release folder before collecting additional evidence.
+If Windows MIDI restoration is the immediate concern, run `Emergency Restore Windows MIDI.cmd` from the same unmodified release folder before collecting additional evidence.

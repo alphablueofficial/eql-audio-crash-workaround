@@ -1,11 +1,11 @@
-name: Quick RC6 success report
-description: Tell us the workaround worked on another affected PC
-title: "[RC6 success] "
+name: Quick RC7 success report
+description: Tell us RC7 worked on another affected PC in about a minute
+title: "[RC7 success] "
 body:
   - type: markdown
     attributes:
       value: |
-        Thank you for confirming RC6 on another affected PC. This short form is only for a clean success. If anything stopped, crashed, lacked audio, or failed restoration, use the [detailed field-test form](https://github.com/alphablueofficial/eql-audio-crash-workaround/issues/new?template=field-test.yml) instead.
+        Thank you for confirming RC7 on another affected PC. This short form is only for a clean success. If anything stopped, crashed, lacked audio, or failed restoration, use the [detailed field-test form](https://github.com/alphablueofficial/eql-audio-crash-workaround/issues/new?template=field-test.yml) instead.
 
         Do not include credentials, tokens, crash dumps, serial numbers, or unreviewed transaction files.
   - type: dropdown
@@ -13,7 +13,7 @@ body:
     attributes:
       label: Release tested
       options:
-        - "v1.0.0-rc6 from this repository's GitHub release page"
+        - "v1.0.0-rc7 from this repository's GitHub release page"
         - "Another version or source"
     validations:
       required: true
