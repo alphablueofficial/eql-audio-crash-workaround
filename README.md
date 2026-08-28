@@ -1,287 +1,139 @@
-# EverQuest Legends #630 audio-login workaround
+# Fix the EverQuest Legends #630 audio crash
 
-A one-button, open-source workaround for one specific **EverQuest Legends** crash:
+Does **EverQuest Legends** crash just after server select while loading sound? This community workaround may let the game start normally **with audio still enabled**.
+
+After the crash, open EQL's installation folder, open `Logs\dbg.txt` in Notepad, press **Ctrl+End**, and check the newest lines. Use this workaround only when they end around:
 
 ```text
 Server selected → Sound Manager loaded →
 Fatal error occurred in mainthread! (Release Client #630)
 ```
 
-> **Status:** `v1.0.0-rc6` release candidate. From August 24–27, 2026, the exact published RC6 script completed six consecutive guarded `Sound=1` launches on the original affected PC. Every run passed `Sound Manager loaded` without `#630`, reached character select, recorded success, and restored the exact registry value and all original MIDI outputs. Additional affected-player confirmation is still needed. This is not a universal fix for every `#630` crash.
+A strong match is: setting `Sound=0` gets you past the crash, but leaves the game with no sound.
 
-## Is this for you?
+> **Current release:** `v1.0.0-rc6` for 64-bit Windows. It completed 6/6 guarded launches on the original affected PC, including automatic Windows MIDI restoration. Confirmation from another affected PC is still needed.
 
-This workaround is a reasonable test if:
+## Download
 
-- EQL reaches server select and then crashes during audio initialization;
-- the current-run `Logs\dbg.txt` reaches approximately `Sound Manager loaded` immediately before the fatal; and
-- setting `Sound=0` lets the game continue, but with no game audio.
+### [Download the ready-to-run v1.0.0-rc6 ZIP](https://github.com/alphablueofficial/eql-audio-crash-workaround/releases/download/v1.0.0-rc6/EQL-Audio-Crash-Workaround-v1.0.0-rc6.zip)
 
-It is **not** intended for:
+Download **`EQL-Audio-Crash-Workaround-v1.0.0-rc6.zip`**—not either of GitHub's **Source code** downloads.
 
-- Error 1017, authentication failures, or server timeouts;
-- LaunchPad patching problems;
-- crashes during ordinary gameplay;
-- a stuck or failed private instance; or
-- a different `Release Client #630` sequence.
+## Run the fix
 
-If the compatibility check does not recognize your PC, the workaround stops instead of guessing.
+1. Right-click the downloaded ZIP and choose **Extract All**. Do not run it from inside the ZIP preview.
+2. If you previously changed `Sound=1` to `Sound=0` in `eqclient.ini`, change it back to `Sound=1`. The workaround does not change this game setting for you.
+3. Close both EQL and the Daybreak LaunchPad.
+4. Open the extracted folder and double-click:
 
-## Quick start
+   ```text
+   Launch EQL Audio Fix.cmd
+   ```
 
-### 1. Download the correct file
+5. If a file picker appears, select the official EQL `LaunchPad.exe` you normally use.
+6. The official LaunchPad opens. Approve the UAC prompt for **Windows PowerShell**.
+7. Return to LaunchPad and click **PLAY** normally.
+8. Keep the command window open until it reports that Windows MIDI restoration **passed**.
 
-Open the [`v1.0.0-rc6` release page](https://github.com/alphablueofficial/eql-audio-crash-workaround/releases/tag/v1.0.0-rc6) and download:
+The workaround installs nothing and has no setup wizard.
 
-```text
-EQL-Audio-Crash-Workaround-v1.0.0-rc6.zip
-```
+This is a **per-launch workaround**, not a permanent patch. Run `Launch EQL Audio Fix.cmd` each time you need to start EQL.
 
-Download the matching `.sha256.txt` file if you want to verify the ZIP. Do **not** use GitHub's automatically generated **Source code** ZIP; it is not the prepared player package.
+## What a normal run looks like
 
-### 2. Extract the whole ZIP
-
-Do not run the files from inside the ZIP preview. Extract the complete folder somewhere you can find it.
-
-### 3. Close EQL and LaunchPad
-
-`eqgame.exe` must not already be running. Close the official Daybreak LaunchPad as well; the workaround will validate and reopen it.
-
-### 4. Run the launcher
-
-Double-click:
-
-```text
-Launch EQL Audio Fix.cmd
-```
-
-If more than one EQL installation is detected, select the `LaunchPad.exe` you actually use. The selected launcher must pass Daybreak signature and product checks.
-
-### 5. Approve UAC, then click PLAY
-
-The official LaunchPad opens at normal user privilege **before** the UAC prompt. Approve the Windows PowerShell UAC prompt, return to LaunchPad, and click **PLAY** normally.
-
-### 6. Keep the command window open
-
-Leave the small command window open while EQL starts. The workaround waits for character-select initialization or a fatal/timeout, restores Windows MIDI, verifies that restoration, and reports the result.
-
-There is nothing to install or configure. RC6 requires 64-bit Windows and the built-in 64-bit Windows PowerShell 5.1.
-
-## What you should see
-
-A normal run looks like this:
-
-1. A compatibility check passes without changing the system.
-2. The signed Daybreak LaunchPad opens normally.
-3. Windows asks for administrator approval for **Windows PowerShell**.
+1. The compatibility check passes.
+2. The signed Daybreak LaunchPad opens.
+3. Windows asks whether **Windows PowerShell** may make changes.
 4. The command window tells you to click **PLAY**.
-5. EQL starts while Microsoft GS Wavetable Synth is temporarily hidden.
-6. The command window restores Windows MIDI and reports whether verification passed.
+5. EQL reaches character select; confirm that game audio is audible.
+6. The command window restores Microsoft GS Wavetable Synth and reports `PASS`.
 
-If a prerequisite, launcher identity, MIDI-device comparison, watchdog check, or restoration check is unexpected, the run stops rather than forcing the change.
+If the PC, launcher, MIDI state, watchdog, or restoration result is unexpected, the workaround stops instead of guessing.
 
-## What it does—in plain English
+## Is this the right problem?
 
-The target crash was localized to Windows initializing **Microsoft GS Wavetable Synth** through `wdmaud.drv`.
-
-For the short period while EQL starts, the workaround:
-
-1. verifies the PC has the exact supported Windows MIDI registration;
-2. validates and opens the official signed Daybreak LaunchPad;
-3. saves the original Windows registry state;
-4. starts an independent restoration watchdog;
-5. temporarily hides only Microsoft GS Wavetable Synth;
-6. verifies that every other MIDI output stayed present;
-7. waits for EQL to reach character-select initialization or fail; and
-8. restores and re-verifies the original Windows MIDI state.
-
-The only temporary system change is this one 64-bit registry value:
-
-```text
-HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Drivers32
-midi = wdmaud.drv    (REG_SZ)
-```
-
-## Different installs and audio setups
-
-RC6 is not tied to the original PC's installation path or audio setup.
-
-| Your setup | What RC6 does |
+| Use this workaround when… | Do not use it for… |
 |---|---|
-| EQL is installed on another fixed drive | Searches common EQL locations on all fixed drives |
-| EQL is in a custom location | Uses an EQL desktop shortcut when available or opens a file picker |
-| More than one EQL installation exists | Asks you to select the one you use instead of guessing |
-| Wave Link is not installed | Works without it; Wave Link is not a dependency |
-| VoiceMeeter, Sonar, VB-Cable, OBS, or other virtual audio is installed | Leaves it alone |
-| Additional virtual or physical MIDI outputs exist | Allows them, but requires the before/after list to stay unchanged except for GS Synth |
-| The Windows MIDI registration is different | Stops without changing it |
-| Daybreak changes its launcher certificate identity | Stops until the project is reviewed and updated |
+| The crash happens after server select during audio initialization | Error 1017, login, authentication, or server problems |
+| `dbg.txt` reaches `Sound Manager loaded` just before `#630` | LaunchPad patching problems |
+| `Sound=0` avoids the crash but removes game audio | Ordinary gameplay crashes |
+| You are on 64-bit Windows with built-in Windows PowerShell 5.1 | A different `Release Client #630` sequence |
 
-This is intentionally **portable but fail-closed**. It should not be described as working on literally every PC.
+## What it changes
 
-## What it does not change
+For only the short period while EQL starts, the workaround temporarily hides **Microsoft GS Wavetable Synth**. It saves the original state first, starts an independent restoration watchdog, and then restores and freshly verifies that every original MIDI output—including GS Synth—is present again.
 
 It does **not**:
 
-- modify, patch, inject into, or redistribute EQL files;
-- automate login, server selection, character selection, or gameplay;
-- stop or reconfigure Wave Link, VoiceMeeter, Sonar, VB-Cable, OBS, or other virtual audio software;
-- change Windows playback or recording defaults;
-- stop Windows audio or MIDI services;
-- replace, disable, or copy `wdmaud.drv`;
+- modify or inject into EQL;
+- change your playback or recording defaults;
+- reconfigure Wave Link, VoiceMeeter, Sonar, VB-Cable, OBS, or other audio software;
+- stop Windows audio services;
 - install a driver, service, scheduled task, startup item, or application;
 - make network requests or upload logs; or
 - read EQL credentials or account tokens.
 
-## Why UAC appears
+The exact temporary Windows value and full safety design are documented in [TECHNICAL.md](TECHNICAL.md).
 
-The temporary registry value is under `HKEY_LOCAL_MACHINE`, so Windows requires administrator approval.
+## If the PC loses power or restoration does not pass
 
-The elevated phase does **not** launch EQL. It performs the bounded registry transaction and restoration checks. The already-open, signed Daybreak LaunchPad starts EQL at normal user privilege.
-
-The package contains unsigned readable PowerShell rather than a signed compiled executable. The CMD button uses `ExecutionPolicy Bypass` only for that PowerShell process; it does not change the machine's saved execution policy.
-
-## Safety and recovery
-
-Normal success, EQL failure, timeout, Ctrl+C, or parent-process loss all trigger restoration. The detached watchdog identifies its parent by both process ID and process start time.
-
-Protected backup, state, runtime, and receipt files are stored under:
-
-```text
-C:\ProgramData\EQL-GS-Synth-Workaround\
-```
-
-That directory is administrator-owned, rejects reparse points, and is read-only to normal users.
-
-### If the PC loses power or the launch is interrupted
-
-After Windows returns, double-click:
+After Windows returns, open the same extracted folder and double-click:
 
 ```text
 Restore Windows MIDI.cmd
 ```
 
-It restores only a recorded active transaction and refuses malformed or unexpected state. Do not manually force the registry change if recovery reports an error.
+Normal success, game failure, timeout, Ctrl+C, or loss of the parent process already trigger automatic restoration. The recovery button is for an interrupted run or a result that did not report restoration `PASS`.
 
-## Optional: check compatibility without UAC
+Recovery restores only a validated active transaction. If it refuses unexpected state, **do not manually edit the registry**—save the exact message and report it.
 
-Technically comfortable users can open Command Prompt in the extracted folder and run:
+## Get help or report your result
+
+- **It worked:** [send a quick success report](https://github.com/alphablueofficial/eql-audio-crash-workaround/issues/new?template=quick-success.yml)
+- **It stopped, crashed, had no sound, or did not restore:** [open the detailed field-test form](https://github.com/alphablueofficial/eql-audio-crash-workaround/issues/new?template=field-test.yml)
+- **Security concern:** [report it privately](https://github.com/alphablueofficial/eql-audio-crash-workaround/security/advisories/new)
+
+Before posting, review the text you share. Installation paths and MIDI-device names may identify your setup. Never post credentials, tokens, unreviewed crash dumps, or a full transaction folder publicly.
+
+## Optional safety checks
+
+### Check compatibility without UAC or changes
+
+Open Command Prompt in the extracted folder and run:
 
 ```bat
 "Launch EQL Audio Fix.cmd" --check-only
 ```
 
-This uses the CMD bootstrap to hash and parse the exact PowerShell script, then checks 64-bit Windows, the registry baseline, GS Synth, and current MIDI outputs. It validates `LaunchPad.exe` only when exactly one candidate can be identified automatically; zero or multiple candidates are reported without opening the file picker in check-only mode.
+### Verify the downloaded ZIP
 
-This command does not verify every file in the ZIP or `CHECKSUMS-SHA256.txt`. Use the ZIP checksum procedure below for package-level verification.
-
-## Verify the downloaded ZIP
-
-Every release includes a ZIP checksum file. On Windows, you can also calculate the hash yourself from Command Prompt:
+Open Command Prompt in the folder containing the **downloaded ZIP**—usually your Downloads folder—then run:
 
 ```bat
 certutil -hashfile "EQL-Audio-Crash-Workaround-v1.0.0-rc6.zip" SHA256
 ```
 
-Compare the result with:
+Expected SHA-256:
 
 ```text
-EQL-Audio-Crash-Workaround-v1.0.0-rc6.zip.sha256.txt
+cd4df8494bd766590f2235fee2435df97c75402269b475fc89fb83f0bb885f74
 ```
 
-Only run the package if the values match and you obtained it from this repository's release page.
+You can also download the [published checksum file](https://github.com/alphablueofficial/eql-audio-crash-workaround/releases/download/v1.0.0-rc6/EQL-Audio-Crash-Workaround-v1.0.0-rc6.zip.sha256.txt).
 
-## Troubleshooting
+## Why UAC appears
 
-### The compatibility check stops
+The workaround must temporarily change one protected Windows MIDI registration, so Windows requires administrator approval. The UAC prompt names **Windows PowerShell** because the package is readable PowerShell source rather than a hidden compiled executable.
 
-Do not force the registry change. Preserve the exact error message and the current-run `Logs\dbg.txt` sequence, then use the [detailed RC field-test form](https://github.com/alphablueofficial/eql-audio-crash-workaround/issues/new?template=field-test.yml).
+`ExecutionPolicy Bypass` applies only to the launched PowerShell process. It does not change the saved execution policy on your PC.
 
-### A file picker opens
+## More detail
 
-Select the official EverQuest Legends `LaunchPad.exe` that you normally use. RC6 opens the picker when it cannot identify one installation uniquely.
+- [Technical design, safety, recovery, and evidence](TECHNICAL.md)
+- [Security policy and private reporting](SECURITY.md)
+- [Full v1.0.0-rc6 release page](https://github.com/alphablueofficial/eql-audio-crash-workaround/releases/tag/v1.0.0-rc6)
 
-### The game still crashes
-
-The watchdog should restore Windows MIDI. Preserve:
-
-- the exact command-window result;
-- the current EQL `Logs\dbg.txt`; and
-- the newest transaction folder name under `C:\ProgramData\EQL-GS-Synth-Workaround\Transactions\`.
-
-Review files before posting: local installation paths and MIDI-device names can identify your setup. Do not post credentials, tokens, unreviewed crash dumps, or a full transaction folder publicly.
-
-### Restoration does not report PASS
-
-Run `Restore Windows MIDI.cmd` from the same unmodified release folder. If it also stops, preserve the exact message and report it instead of manually editing the registry.
-
-## Report results or security concerns
-
-- If RC6 worked cleanly, use the short [quick success report](https://github.com/alphablueofficial/eql-audio-crash-workaround/issues/new?template=quick-success.yml).
-- If compatibility stopped, EQL still crashed, audio was missing, or restoration did not report PASS, use the [detailed RC field-test form](https://github.com/alphablueofficial/eql-audio-crash-workaround/issues/new?template=field-test.yml).
-- Use [private vulnerability reporting](https://github.com/alphablueofficial/eql-audio-crash-workaround/security/advisories/new) for privilege-boundary, rollback, tampering, registry, or code-execution concerns.
-- Read [SECURITY.md](SECURITY.md) before sharing sensitive technical evidence.
-
-Useful field-test results include:
-
-- Windows version and architecture;
-- EQL installation location;
-- relevant virtual audio and MIDI software;
-- the original `dbg.txt` crash sequence;
-- compatibility result;
-- whether character select loaded with audible game audio; and
-- whether exact restoration reported PASS.
-
-## Trust and source review
-
-The package contains no compiled project executable. The implementation is one readable [`EQL-Audio-Fix.ps1`](EQL-Audio-Fix.ps1) file plus two CMD buttons:
-
-```text
-Launch EQL Audio Fix.cmd
-Restore Windows MIDI.cmd
-EQL-Audio-Fix.ps1
-README.md
-SECURITY.md
-LICENSE
-CHECKSUMS-SHA256.txt
-```
-
-The CMD launcher reads the script's raw bytes once, hashes them, and executes those exact bytes from memory. Direct normal `-File` entry is rejected. The initial digest remains bound through compatibility checks, LaunchPad startup, UAC, protected staging, watchdog, and MIDI-probe child processes. Changed disk bytes are rejected before elevated parsing or registry mutation.
-
-## Technical transaction sequence
-
-During a live launch, RC6:
-
-1. The CMD bootstrap explicitly invokes the built-in 64-bit Windows PowerShell and executes the hash-bound script bytes from memory.
-2. At normal user privilege, the script checks the supported 64-bit registry/MIDI baseline, validates the selected `LaunchPad.exe`, opens it at medium integrity, and refuses an already-running elevated copy.
-3. After UAC, the encoded bootstrap re-verifies the original entry digest before parsing the elevated script.
-4. The elevated phase initializes protected, non-reparse ProgramData storage, stages and hashes the trusted runtime, and recovers any valid stale active transaction.
-5. It revalidates the running LaunchPad process and requires exactly `midi=wdmaud.drv` as `REG_SZ`, in the 64-bit `Drivers32` view, plus exactly one freshly enumerable GS Synth output.
-6. It creates the current transaction folder, exports the complete 64-bit `Drivers32` key, and writes protected rollback state.
-7. It starts a detached watchdog and requires a valid ready receipt before registry deletion.
-8. It removes only the exact `midi` value and requires a fresh 64-bit MIDI probe to equal the original duplicate-aware list minus only GS Synth.
-9. It waits for new `eqgame.exe` and current-run character-select/fatal log markers.
-10. It restores the original `REG_SZ` value and requires a fresh process to see the complete original MIDI-output list again.
-
-## Technical evidence
-
-A preserved x64 minidump for the target signature recorded a `0xc0000005` null read in `C:\Windows\System32\wdmaud.drv`. Microsoft public symbols resolved the first unwind path to:
-
-```text
-CMicrosoftGSWavetableSynth::LoadDLSFile
-  → CWasapiRenderer::Initialize
-  → wdmaud.drv null vtable read (RCX = 0)
-```
-
-On the original affected PC, watchdog-backed GS Synth isolation passed repeated `Sound=1` launches with audible game audio and exact restoration. Removing the isolation later allowed the same cold-launch `#630` to recur; reinstating isolation passed again.
-
-The exact GitHub-hosted RC6 ZIP later completed the full guarded path on that PC: official LaunchPad validation, UAC handoff, watchdog readiness, GS Synth isolation, `Sound Manager loaded`, character select, success receipt, exact `midi=wdmaud.drv` restoration, and restoration of all four original MIDI outputs. EQL remained alive and responsive at character select through a delayed-fatal check. Audible output was not independently confirmed through the remote-access session during that specific RC6 run.
-
-Five later operational launches used the same published RC6 script hash. Across all six RC6 runs from August 24–27, 2026, every run reached character-select initialization, recorded `Outcome: success`, restored the exact baseline MIDI-output list, and received both parent and watchdog restoration confirmation. No run required next-run recovery. GS Synth remained isolated for 33.6–63.6 seconds per run (47.7-second median).
-
-RC6 retains release-candidate status until additional affected PCs provide live field confirmation.
-
-This is a community workaround, not an official Daybreak, Game Jawn, Elgato, or Microsoft fix.
+This is an unsigned community workaround, not an official Daybreak, Game Jawn, Elgato, or Microsoft fix. The release remains a prerelease until another affected PC confirms the matching crash and result.
 
 ## License
 
