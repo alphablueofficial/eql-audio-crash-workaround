@@ -1,11 +1,11 @@
-name: RC field-test report
-description: Report a compatibility or live-launch result from another affected PC
+name: Detailed field test or problem report
+description: Report a stopped check, failed launch, missing audio, restoration problem, or detailed result
 title: "[Field test] "
 body:
   - type: markdown
     attributes:
       value: |
-        Thank you for testing the release candidate. Do not include account credentials, tokens, crash dumps, or unreviewed transaction files. Local paths and MIDI-device names may identify your setup.
+        Thank you for testing the release candidate. If everything worked cleanly, the shorter [quick success report](https://github.com/alphablueofficial/eql-audio-crash-workaround/issues/new?template=quick-success.yml) is enough. Do not include account credentials, tokens, crash dumps, or unreviewed transaction files. Local paths and MIDI-device names may identify your setup.
   - type: input
     id: release
     attributes:

@@ -1,0 +1,78 @@
+name: Quick RC6 success report
+description: Tell us the workaround worked on another affected PC
+title: "[RC6 success] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for confirming RC6 on another affected PC. This short form is only for a clean success. If anything stopped, crashed, lacked audio, or failed restoration, use the [detailed field-test form](https://github.com/alphablueofficial/eql-audio-crash-workaround/issues/new?template=field-test.yml) instead.
+
+        Do not include credentials, tokens, crash dumps, serial numbers, or unreviewed transaction files.
+  - type: dropdown
+    id: release
+    attributes:
+      label: Release tested
+      options:
+        - "v1.0.0-rc6 from this repository's GitHub release page"
+        - "Another version or source"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version and architecture
+      placeholder: "Windows 11 64-bit, build 26100"
+    validations:
+      required: true
+  - type: dropdown
+    id: target_signature
+    attributes:
+      label: Did your original crash match the documented target?
+      description: 'Server selected, Sound Manager loaded, then Release Client #630; Sound=0 continued without game audio.'
+      options:
+        - "Yes"
+        - "Mostly or not sure"
+        - "No"
+    validations:
+      required: true
+  - type: dropdown
+    id: character_select
+    attributes:
+      label: Did EQL reach character select?
+      options:
+        - "Yes"
+        - "No"
+    validations:
+      required: true
+  - type: dropdown
+    id: audio
+    attributes:
+      label: Was game audio audible?
+      options:
+        - "Yes"
+        - "No"
+        - "Not checked"
+    validations:
+      required: true
+  - type: dropdown
+    id: restoration
+    attributes:
+      label: Did the command window report that restoration passed?
+      options:
+        - "Yes — restoration reported PASS"
+        - "No"
+        - "Not sure"
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Optional notes
+      description: Mention relevant audio software or anything unusual. Remove personal paths and device serial numbers.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I reviewed this report and removed credentials, tokens, crash dumps, serial numbers, and unnecessary personal paths.
+          required: true

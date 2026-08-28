@@ -7,7 +7,7 @@ Server selected → Sound Manager loaded →
 Fatal error occurred in mainthread! (Release Client #630)
 ```
 
-> **Status:** `v1.0.0-rc6` release candidate. The exact GitHub-hosted RC6 ZIP completed a guarded live `Sound=1` launch on the original affected PC: it passed `Sound Manager loaded` without `#630`, reached character select, recorded success, and restored the exact registry value and all original MIDI outputs. Additional affected-player confirmation is still needed. This is not a universal fix for every `#630` crash.
+> **Status:** `v1.0.0-rc6` release candidate. From August 24–27, 2026, the exact published RC6 script completed six consecutive guarded `Sound=1` launches on the original affected PC. Every run passed `Sound Manager loaded` without `#630`, reached character select, recorded success, and restored the exact registry value and all original MIDI outputs. Additional affected-player confirmation is still needed. This is not a universal fix for every `#630` crash.
 
 ## Is this for you?
 
@@ -195,7 +195,7 @@ Only run the package if the values match and you obtained it from this repositor
 
 ### The compatibility check stops
 
-Do not force the registry change. Preserve the exact error message and the current-run `Logs\dbg.txt` sequence, then use the [RC field-test form](https://github.com/alphablueofficial/eql-audio-crash-workaround/issues/new?template=field-test.yml).
+Do not force the registry change. Preserve the exact error message and the current-run `Logs\dbg.txt` sequence, then use the [detailed RC field-test form](https://github.com/alphablueofficial/eql-audio-crash-workaround/issues/new?template=field-test.yml).
 
 ### A file picker opens
 
@@ -217,7 +217,8 @@ Run `Restore Windows MIDI.cmd` from the same unmodified release folder. If it al
 
 ## Report results or security concerns
 
-- Use the [RC field-test form](https://github.com/alphablueofficial/eql-audio-crash-workaround/issues/new?template=field-test.yml) for compatibility and live-launch results from another affected PC.
+- If RC6 worked cleanly, use the short [quick success report](https://github.com/alphablueofficial/eql-audio-crash-workaround/issues/new?template=quick-success.yml).
+- If compatibility stopped, EQL still crashed, audio was missing, or restoration did not report PASS, use the [detailed RC field-test form](https://github.com/alphablueofficial/eql-audio-crash-workaround/issues/new?template=field-test.yml).
 - Use [private vulnerability reporting](https://github.com/alphablueofficial/eql-audio-crash-workaround/security/advisories/new) for privilege-boundary, rollback, tampering, registry, or code-execution concerns.
 - Read [SECURITY.md](SECURITY.md) before sharing sensitive technical evidence.
 
@@ -275,6 +276,8 @@ CMicrosoftGSWavetableSynth::LoadDLSFile
 On the original affected PC, watchdog-backed GS Synth isolation passed repeated `Sound=1` launches with audible game audio and exact restoration. Removing the isolation later allowed the same cold-launch `#630` to recur; reinstating isolation passed again.
 
 The exact GitHub-hosted RC6 ZIP later completed the full guarded path on that PC: official LaunchPad validation, UAC handoff, watchdog readiness, GS Synth isolation, `Sound Manager loaded`, character select, success receipt, exact `midi=wdmaud.drv` restoration, and restoration of all four original MIDI outputs. EQL remained alive and responsive at character select through a delayed-fatal check. Audible output was not independently confirmed through the remote-access session during that specific RC6 run.
+
+Five later operational launches used the same published RC6 script hash. Across all six RC6 runs from August 24–27, 2026, every run reached character-select initialization, recorded `Outcome: success`, restored the exact baseline MIDI-output list, and received both parent and watchdog restoration confirmation. No run required next-run recovery. GS Synth remained isolated for 33.6–63.6 seconds per run (47.7-second median).
 
 RC6 retains release-candidate status until additional affected PCs provide live field confirmation.
 
