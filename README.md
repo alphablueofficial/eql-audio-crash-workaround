@@ -19,6 +19,8 @@ A strong match is: setting `Sound=0` gets you past the crash, but leaves the gam
 
 Download **`EQL-Audio-Crash-Workaround-v1.0.0-rc6.zip`**—not either of GitHub's **Source code** downloads.
 
+> **Why the README inside the ZIP looks different:** the tested RC6 ZIP is frozen and still contains its longer release-time README. This GitHub page is the current simplified guide; the tested program files and ZIP were not replaced.
+
 ## Run the fix
 
 1. Right-click the downloaded ZIP and choose **Extract All**. Do not run it from inside the ZIP preview.
@@ -38,6 +40,12 @@ Download **`EQL-Audio-Crash-Workaround-v1.0.0-rc6.zip`**—not either of GitHub'
 The workaround installs nothing and has no setup wizard.
 
 This is a **per-launch workaround**, not a permanent patch. Run `Launch EQL Audio Fix.cmd` each time you need to start EQL.
+
+### Different install or audio setup?
+
+- EQL may be installed on another drive or in a custom folder. If the workaround cannot identify it automatically, it opens a file picker.
+- If you have multiple EQL installations, select the official `LaunchPad.exe` for the installation you actually use.
+- **Wave Link is not required.** VoiceMeeter, Sonar, VB-Cable, OBS, and other audio tools are left alone.
 
 ## What a normal run looks like
 
