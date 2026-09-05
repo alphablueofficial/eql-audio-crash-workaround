@@ -11,7 +11,7 @@ body:
     attributes:
       label: Release and ZIP SHA-256
       description: Copy the release name and the SHA-256 you verified.
-      placeholder: "v1.0.0-rc6 — SHA-256 ..."
+      placeholder: "v1.0.0-rc8 — SHA-256 ..."
     validations:
       required: true
   - type: input

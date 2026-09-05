@@ -16,7 +16,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:Version = '1.0.0-rc6'
+$script:Version = '1.0.0-rc8'
 $script:RegistrySubKey = 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Drivers32'
 $script:RegistryDisplayPath = 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Drivers32'
 $script:RegistryValueName = 'midi'
@@ -33,6 +33,9 @@ $script:RuntimeSha256 = ''
 $script:LogFile = $null
 $script:InstanceMutex = $null
 $script:OwnsInstanceMutex = $false
+$script:FinalResultWritten = $false
+$script:LiveTransactionStarted = $false
+$script:LiveRestorationVerified = $false
 
 function Write-Status {
     param([string]$Message, [string]$Level = 'INFO')
@@ -40,6 +43,23 @@ function Write-Status {
     Write-Host $line
     if ($script:LogFile) {
         try { [IO.File]::AppendAllText($script:LogFile, $line + [Environment]::NewLine) } catch { }
+    }
+}
+
+function Write-FinalResult {
+    param([string]$Message, [string]$Level)
+    $script:FinalResultWritten = $true
+    Write-Status $Message $Level
+}
+
+function Write-LaunchResult {
+    param([int]$ExitCode, [string]$Details = '')
+    $suffix = if ([string]::IsNullOrWhiteSpace($Details)) { '' } else { ' Details: ' + $Details }
+    switch ($ExitCode) {
+        0 { Write-FinalResult 'SUCCESS - EQL reached character select and Windows MIDI was fully restored.' 'PASS' }
+        2 { Write-FinalResult ('FAILED - EQL did not reach character select. Windows MIDI was fully restored.' + $suffix) 'ERROR' }
+        3 { Write-FinalResult ('FAILED - Windows MIDI restoration could not be verified. Run Emergency Restore Windows MIDI.cmd.' + $suffix) 'ERROR' }
+        default { Write-FinalResult 'STOPPED - The guarded run did not complete. No temporary change was confirmed; review the elevated error above.' 'ERROR' }
     }
 }
 
@@ -282,7 +302,7 @@ function Get-RegistrySnapshot {
 function Assert-ExpectedBaseline {
     param([object]$Snapshot)
     if (-not $Snapshot.Present) {
-        throw ('The expected {0}\{1} value is absent. Nothing was changed.' -f $script:RegistryDisplayPath, $script:RegistryValueName)
+        throw ('The expected {0}\{1} value is absent. Nothing was changed. If a previous workaround run was interrupted, run Emergency Restore Windows MIDI.cmd, then retry.' -f $script:RegistryDisplayPath, $script:RegistryValueName)
     }
     if (-not ([string]$Snapshot.Value).Equals($script:ExpectedValue, [StringComparison]::OrdinalIgnoreCase)) {
         throw ('Unexpected Drivers32 value: expected {0}={1}, found {2}. Nothing was changed.' -f $script:RegistryValueName, $script:ExpectedValue, $Snapshot.Value)
@@ -298,13 +318,23 @@ function Assert-WorkaroundState {
     if ([string]$State.RegistryPath -ne $script:RegistryDisplayPath) { throw 'State registry path is not approved.' }
     if ([string]$State.RegistryView -ne 'Registry64') { throw 'State registry view is not approved.' }
     if ([string]$State.ValueName -ne $script:RegistryValueName) { throw 'State value name is not approved.' }
-    if (-not [bool]$State.OriginalPresent) { throw 'State does not contain the required original value.' }
+    if ($State.OriginalPresent -isnot [bool] -or -not $State.OriginalPresent) { throw 'State does not contain the required original value.' }
+    if ($State.Active -isnot [bool]) { throw 'State active flag must be a Boolean.' }
     if (-not ([string]$State.OriginalValue).Equals($script:ExpectedValue, [StringComparison]::OrdinalIgnoreCase)) { throw 'State original value is not approved.' }
     if ([string]$State.OriginalKind -ne $script:ExpectedKind) { throw 'State original registry type is not approved.' }
     if ([int]$State.ParentPid -le 0) { throw 'State parent PID is invalid.' }
     $parentStart = [DateTime]::MinValue
     if (-not [DateTime]::TryParse([string]$State.ParentStartTimeUtc, [ref]$parentStart)) { throw 'State parent start time is invalid.' }
     if ([int64]$State.DeadlineEpoch -le 0) { throw 'State deadline is invalid.' }
+    if ($State.BaselineMidiOutputs -isnot [array] -or $State.BaselineMidiOutputs.Count -eq 0) {
+        throw 'State baseline MIDI outputs must be a nonempty array.'
+    }
+    foreach ($name in $State.BaselineMidiOutputs) {
+        if ($name -isnot [string] -or [string]::IsNullOrWhiteSpace($name)) { throw 'State baseline contains an invalid MIDI name.' }
+    }
+    if (@($State.BaselineMidiOutputs | Where-Object { $_.Equals($script:GsSynthName, [StringComparison]::OrdinalIgnoreCase) }).Count -ne 1) {
+        throw 'State baseline must contain exactly one Microsoft GS Wavetable Synth.'
+    }
 }
 
 function Remove-GsSynthRegistration {
@@ -372,6 +402,7 @@ function Write-MidiProbeJson {
 }
 
 function Invoke-MidiProbe {
+    param([ValidateRange(100, 30000)][int]$TimeoutMilliseconds = 30000)
     if (-not $script:RuntimeSha256) { throw 'Runtime script identity is not initialized.' }
     $startInfo = New-Object Diagnostics.ProcessStartInfo
     $startInfo.FileName = $script:PowerShellExe
@@ -382,22 +413,44 @@ function Invoke-MidiProbe {
     $startInfo.RedirectStandardError = $true
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $startInfo
-    [void]$process.Start()
-    $stdout = $process.StandardOutput.ReadToEnd()
-    $stderr = $process.StandardError.ReadToEnd()
-    if (-not $process.WaitForExit(30000)) {
-        try { $process.Kill() } catch { }
-        throw 'The fresh-process MIDI probe timed out.'
-    }
-    $process.WaitForExit()
-    $process.Refresh()
-    if ($process.ExitCode -ne 0) { throw ('The fresh-process MIDI probe failed: ' + $stderr.Trim()) }
+    $started = $false
     try {
-        $result = $stdout | ConvertFrom-Json
-        if ([int]$result.processBitness -ne 64) { throw 'The MIDI probe did not run as a 64-bit process.' }
-        return @($result.devices)
+        $started = $process.Start()
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        # Drain both pipes concurrently before waiting; synchronous reads can bypass
+        # the timeout or deadlock when the other redirected pipe fills.
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutMilliseconds)) { throw 'The fresh-process MIDI probe timed out.' }
+        $remaining = [Math]::Max(0, $TimeoutMilliseconds - [int]$timer.ElapsedMilliseconds)
+        if (-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdoutTask, $stderrTask), $remaining)) {
+            throw 'The fresh-process MIDI probe timed out while draining output.'
+        }
+        $stdout = $stdoutTask.Result
+        $stderr = $stderrTask.Result
+        if ($process.ExitCode -ne 0) { throw ('The fresh-process MIDI probe failed: ' + $stderr.Trim()) }
+        try {
+            $result = $stdout | ConvertFrom-Json
+            if ($result.schema -cne 'eql-midi-probe-v1' -or
+                $result.processBitness -isnot [int] -or $result.processBitness -ne 64 -or
+                $result.devices -isnot [array]) { throw 'Expected a 64-bit eql-midi-probe-v1 device array.' }
+            foreach ($device in $result.devices) {
+                if ($device.id -isnot [int] -or $device.id -lt 0 -or
+                    $device.name -isnot [string] -or [string]::IsNullOrWhiteSpace($device.name) -or
+                    $device.result -isnot [int] -or $device.result -ne 0) {
+                    throw 'A MIDI device could not be enumerated successfully.'
+                }
+            }
+            return @($result.devices)
+        }
+        catch { throw ('The MIDI probe returned invalid output: ' + $_.Exception.Message) }
     }
-    catch { throw ('The MIDI probe returned invalid output: ' + $_.Exception.Message) }
+    finally {
+        if ($started) {
+            try { if (-not $process.HasExited) { $process.Kill(); [void]$process.WaitForExit(1000) } } catch { }
+        }
+        $process.Dispose()
+    }
 }
 
 function Get-DeviceNames {
@@ -405,31 +458,15 @@ function Get-DeviceNames {
     return @($Devices | ForEach-Object { [string]$_.name })
 }
 
-function Test-IsolationDelta {
-    param([string[]]$Before, [string[]]$After)
+function Test-DeviceNameMultisetEqual {
+    param([string[]]$Expected, [string[]]$Actual)
+    if ($Expected.Count -ne $Actual.Count) { return $false }
     $remaining = New-Object Collections.Generic.List[string]
-    foreach ($name in $Before) { $remaining.Add([string]$name) }
-    $matches = @($remaining | Where-Object { $_.Equals($script:GsSynthName, [StringComparison]::OrdinalIgnoreCase) })
-    if ($matches.Count -ne 1) { return $false }
-    for ($index = 0; $index -lt $remaining.Count; $index++) {
-        if ($remaining[$index].Equals($script:GsSynthName, [StringComparison]::OrdinalIgnoreCase)) {
-            $remaining.RemoveAt($index)
-            break
-        }
-    }
-    $expected = @($remaining | Sort-Object)
-    $actual = @($After | Sort-Object)
-    return -not [bool](Compare-Object -ReferenceObject $expected -DifferenceObject $actual)
-}
-
-function Test-RestoredDevices {
-    param([string[]]$Before, [string[]]$After)
-    $remaining = New-Object Collections.Generic.List[string]
-    foreach ($name in $After) { $remaining.Add([string]$name) }
-    foreach ($expected in $Before) {
+    foreach ($name in $Actual) { $remaining.Add([string]$name) }
+    foreach ($expectedName in $Expected) {
         $found = -1
         for ($index = 0; $index -lt $remaining.Count; $index++) {
-            if ($remaining[$index].Equals($expected, [StringComparison]::OrdinalIgnoreCase)) {
+            if ($remaining[$index].Equals($expectedName, [StringComparison]::OrdinalIgnoreCase)) {
                 $found = $index
                 break
             }
@@ -437,7 +474,29 @@ function Test-RestoredDevices {
         if ($found -lt 0) { return $false }
         $remaining.RemoveAt($found)
     }
-    return [bool]($After | Where-Object { $_.Equals($script:GsSynthName, [StringComparison]::OrdinalIgnoreCase) })
+    return $remaining.Count -eq 0
+}
+
+function Test-IsolationDelta {
+    param([string[]]$Before, [string[]]$After)
+    $expected = New-Object Collections.Generic.List[string]
+    foreach ($name in $Before) { $expected.Add([string]$name) }
+    $matches = @($expected | Where-Object { $_.Equals($script:GsSynthName, [StringComparison]::OrdinalIgnoreCase) })
+    if ($matches.Count -ne 1) { return $false }
+    for ($index = 0; $index -lt $expected.Count; $index++) {
+        if ($expected[$index].Equals($script:GsSynthName, [StringComparison]::OrdinalIgnoreCase)) {
+            $expected.RemoveAt($index)
+            break
+        }
+    }
+    return Test-DeviceNameMultisetEqual -Expected @($expected) -Actual $After
+}
+
+function Assert-RestoredMidiBaseline {
+    param([object]$State, [string[]]$Names)
+    if (-not (Test-DeviceNameMultisetEqual -Expected $State.BaselineMidiOutputs -Actual $Names)) {
+        throw ('Fresh-process restoration verification did not exactly match the duplicate-aware baseline. Baseline={0}; Restored={1}' -f ($State.BaselineMidiOutputs -join ', '), ($Names -join ', '))
+    }
 }
 
 function Export-Drivers32 {
@@ -665,25 +724,36 @@ function Get-InitializationStatus {
 }
 
 function Wait-ForNewEqgame {
-    param([int[]]$BaselinePids, [int]$TimeoutSeconds)
+    param([int[]]$BaselinePids, [int]$TimeoutSeconds, [string]$ExpectedPath)
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     Write-Status 'LaunchPad is open. Click PLAY normally; the workaround is waiting for the new eqgame.exe process.'
     while ((Get-Date) -lt $deadline) {
-        $pids = @(Get-Process -Name eqgame -ErrorAction SilentlyContinue | ForEach-Object { [int]$_.Id })
-        $newPids = @($pids | Where-Object { $BaselinePids -notcontains $_ })
-        if ($newPids.Count -gt 0) { return [int]($newPids | Sort-Object -Descending | Select-Object -First 1) }
+        $newGames = @(Get-Process -Name eqgame -ErrorAction SilentlyContinue | Where-Object { $BaselinePids -notcontains [int]$_.Id })
+        if ($newGames.Count -gt 1) { throw 'Multiple new eqgame.exe processes opened; expected exactly one selected EQL installation.' }
+        if ($newGames.Count -eq 1) {
+            $game = $newGames[0]
+            if (-not ([string]$game.Path).Equals($ExpectedPath, [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'The new eqgame.exe process path does not match the selected EQL installation.'
+            }
+            return [pscustomobject]@{ Id = [int]$game.Id; Path = [string]$game.Path; StartTimeUtc = $game.StartTime.ToUniversalTime().ToString('o') }
+        }
         Start-Sleep -Milliseconds 250
     }
     throw ('Timed out after {0} seconds waiting for PLAY/eqgame.exe.' -f $TimeoutSeconds)
 }
 
 function Wait-ForEqlInitialization {
-    param([int]$EqgamePid, [string]$DebugLogPath, [string]$BaselineLogText, [int]$TimeoutSeconds)
+    param([object]$Game, [string]$DebugLogPath, [string]$BaselineLogText, [int]$TimeoutSeconds)
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $soundReported = $false
     while ((Get-Date) -lt $deadline) {
-        if (-not (Get-Process -Id $EqgamePid -ErrorAction SilentlyContinue)) {
+        $currentGame = Get-Process -Id $Game.Id -ErrorAction SilentlyContinue
+        if (-not $currentGame) {
             throw 'eqgame.exe exited before character-select initialization.'
+        }
+        if (-not ([string]$currentGame.Path).Equals($Game.Path, [StringComparison]::OrdinalIgnoreCase) -or
+            $currentGame.StartTime.ToUniversalTime().ToString('o') -cne $Game.StartTimeUtc) {
+            throw 'The eqgame.exe process identity changed before character-select initialization.'
         }
         $segment = Get-CurrentRunLogSegment $DebugLogPath $BaselineLogText
         $status = Get-InitializationStatus $segment
@@ -780,9 +850,7 @@ function Invoke-Watchdog {
         try {
             Restore-GsSynthRegistration $state
             $names = @(Get-DeviceNames @(Invoke-MidiProbe))
-            if (-not ($names | Where-Object { $_.Equals($script:GsSynthName, [StringComparison]::OrdinalIgnoreCase) })) {
-                throw 'GS Synth did not freshly enumerate after watchdog restoration.'
-            }
+            Assert-RestoredMidiBaseline $state $names
             $state.Active = $false
             $state | Add-Member -NotePropertyName WatchdogRestored -NotePropertyValue $true -Force
             $state | Add-Member -NotePropertyName WatchdogRestoredAtUtc -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force
@@ -801,14 +869,14 @@ function Invoke-StaleRecovery {
         return 0
     }
     $active = New-Object Collections.Generic.List[object]
-    foreach ($file in Get-ChildItem -LiteralPath $script:BackupRoot -Filter 'state.json' -File -Recurse -ErrorAction SilentlyContinue) {
+    foreach ($file in Get-ChildItem -LiteralPath $script:BackupRoot -Filter 'state.json' -File -Recurse -ErrorAction Stop) {
         try {
             $state = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
             Assert-WorkaroundState $state
             if ([bool]$state.Active) { $active.Add([pscustomobject]@{ File = $file; State = $state }) }
         }
         catch {
-            Write-Status ('Ignored an invalid state file: ' + $file.FullName) 'WARN'
+            throw ('Recovery stopped at an unreadable or invalid state file: {0}. Details: {1}' -f $file.FullName, $_.Exception.Message)
         }
     }
     if ($active.Count -eq 0) {
@@ -818,17 +886,14 @@ function Invoke-StaleRecovery {
     foreach ($entry in $active) {
         Write-Status ('Recovering recorded transaction: ' + $entry.File.DirectoryName) 'WARN'
         Restore-GsSynthRegistration $entry.State
+        $names = @(Get-DeviceNames @(Invoke-MidiProbe))
+        Assert-RestoredMidiBaseline $entry.State $names
         $entry.State.Active = $false
         $entry.State | Add-Member -NotePropertyName RecoveredByNextRun -NotePropertyValue $true -Force
         $entry.State | Add-Member -NotePropertyName RecoveredAtUtc -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force
         Write-JsonAtomic $entry.File.FullName $entry.State
     }
-    $devices = @(Invoke-MidiProbe)
-    $names = @(Get-DeviceNames $devices)
-    if (-not ($names | Where-Object { $_.Equals($script:GsSynthName, [StringComparison]::OrdinalIgnoreCase) })) {
-        throw 'Recovery wrote the registry value, but a fresh process still cannot enumerate Microsoft GS Wavetable Synth.'
-    }
-    Write-Status ('Recovered {0} transaction(s); GS Synth is registered and freshly enumerable.' -f $active.Count) 'PASS'
+    Write-Status ('Recovered {0} transaction(s); registration and exact baseline MIDI outputs were verified.' -f $active.Count) 'PASS'
     return $active.Count
 }
 
@@ -939,7 +1004,13 @@ function Invoke-LiveWorkaround {
 
     $restored = $false
     $outcome = 'failure'
+    $operationError = $null
     try {
+        # Capture once before isolation. PLAY during the fresh probe must remain a
+        # new process, not become an excluded baseline PID after isolation.
+        $baselinePids = @(Get-Process -Name eqgame -ErrorAction SilentlyContinue | ForEach-Object { [int]$_.Id })
+        if ($baselinePids.Count -gt 0) { throw 'eqgame.exe started before isolation was ready. Close EQL and retry; click PLAY after the waiting message.' }
+        $script:LiveTransactionStarted = $true
         Remove-GsSynthRegistration
         $isolatedDevices = @(Invoke-MidiProbe)
         $isolatedNames = @(Get-DeviceNames $isolatedDevices)
@@ -954,12 +1025,13 @@ function Invoke-LiveWorkaround {
 
         [void](Assert-OfficialLaunchPad $launchPad)
         [void](Assert-MatchingLaunchPadRunning $launchPad)
-        $baselinePids = @(Get-Process -Name eqgame -ErrorAction SilentlyContinue | ForEach-Object { [int]$_.Id })
-        Write-Status 'The signed Daybreak LaunchPad is already open at normal user integrity. Click PLAY normally.'
-        $eqgamePid = Wait-ForNewEqgame $baselinePids $LaunchTimeoutSeconds
-        Write-Status ('Detected new eqgame.exe PID ' + $eqgamePid + '.')
-        Wait-ForEqlInitialization $eqgamePid $debugLogPath $baselineLogText $InitializationTimeoutSeconds
+        $game = Wait-ForNewEqgame $baselinePids $LaunchTimeoutSeconds (Join-Path $installDirectory 'eqgame.exe')
+        Write-Status ('Detected selected EQL eqgame.exe PID ' + $game.Id + '.')
+        Wait-ForEqlInitialization $game $debugLogPath $baselineLogText $InitializationTimeoutSeconds
         $outcome = 'success'
+    }
+    catch {
+        $operationError = $_.Exception
     }
     finally {
         $lastRestoreError = $null
@@ -968,9 +1040,7 @@ function Invoke-LiveWorkaround {
                 Restore-GsSynthRegistration $state
                 $restoredDevices = @(Invoke-MidiProbe)
                 $restoredNames = @(Get-DeviceNames $restoredDevices)
-                if (-not (Test-RestoredDevices $beforeNames $restoredNames)) {
-                    throw ('Fresh-process restoration verification is incomplete. Baseline={0}; Restored={1}' -f ($beforeNames -join ', '), ($restoredNames -join ', '))
-                }
+                Assert-RestoredMidiBaseline $state $restoredNames
                 $state.Active = $false
                 $state.Outcome = $outcome
                 $state.ParentRestored = $true
@@ -978,6 +1048,7 @@ function Invoke-LiveWorkaround {
                 $state.RestoredMidiOutputs = $restoredNames
                 Write-JsonAtomic $statePath $state
                 $restored = $true
+                $script:LiveRestorationVerified = $true
                 Write-Status 'Exact 64-bit midi=wdmaud.drv registration restored; GS Synth is freshly enumerable again.' 'PASS'
                 break
             }
@@ -987,15 +1058,18 @@ function Invoke-LiveWorkaround {
             }
         }
         if (-not $restored) {
-            Write-Status ('CRITICAL RESTORE ERROR: ' + $lastRestoreError.Message) 'ERROR'
+            Write-LaunchResult 3 $folder
+            Write-Status ('Restore error: ' + $lastRestoreError.Message) 'ERROR'
             Write-Status ('Leave this window open briefly; watchdog PID {0} will retry restoration when the parent exits or its deadline expires.' -f $state.WatchdogPid) 'ERROR'
             throw ('The parent could not verify GS Synth restoration: ' + $lastRestoreError.Message)
         }
     }
 
-    if ($outcome -eq 'success') {
-        Write-Status 'EQL passed the guarded initialization boundary and all Windows MIDI state was restored.' 'PASS'
+    if ($operationError) {
+        Write-LaunchResult 2 $folder
+        throw $operationError
     }
+    Write-LaunchResult 0
 }
 
 $exitCode = 0
@@ -1016,9 +1090,11 @@ try {
         }
         'Recover' {
             if (-not (Test-IsAdministrator)) {
-                if (-not (Get-TrustedSourceBytes)) { throw 'Recover mode must start through Restore Windows MIDI.cmd.' }
+                if (-not (Get-TrustedSourceBytes)) { throw 'Recover mode must start through Emergency Restore Windows MIDI.cmd.' }
                 $entrySha256 = Assert-ScriptIdentity $ExpectedScriptSha256
                 $exitCode = Invoke-ElevatedCopy 'Recover' $entrySha256
+                if ($exitCode -eq 0) { Write-FinalResult 'RECOVERY COMPLETE - No recorded active transaction remains.' 'PASS' }
+                else { Write-FinalResult 'RECOVERY STOPPED - Windows MIDI recovery did not complete. Review the elevated error above.' 'ERROR' }
                 break
             }
             if (-not (Get-TrustedSourceBytes)) { throw 'Recover mode requires the hash-verifying elevated bootstrap.' }
@@ -1027,7 +1103,9 @@ try {
             try {
                 Initialize-ProtectedBackupRoot
                 [void](Stage-ProtectedRuntimeScript $script:RuntimeSha256)
-                [void](Invoke-StaleRecovery)
+                $recovered = Invoke-StaleRecovery
+                if ($recovered -gt 0) { Write-FinalResult ('RECOVERY COMPLETE - Restored {0} recorded transaction(s).' -f $recovered) 'PASS' }
+                else { Write-FinalResult 'RECOVERY CHECK COMPLETE - No recorded active transaction required restoration.' 'PASS' }
             }
             finally { Exit-WorkaroundMutex }
         }
@@ -1052,12 +1130,19 @@ try {
             Write-Status ('Verified and opened signed Daybreak LaunchPad at medium integrity before UAC (PID {0}, RID 0x{1:X}).' -f $normalLaunchPad.Id, $normalLaunchPad.IntegrityRid) 'PASS'
             $LaunchPadPath = $approvedPath
             $exitCode = Invoke-ElevatedCopy 'Elevated' $entrySha256
+            Write-LaunchResult $exitCode
         }
     }
 }
 catch {
     if ($Mode -in @('Probe', 'Watchdog')) { [Console]::Error.WriteLine($_.Exception.Message) }
-    else { Write-Status $_.Exception.Message 'ERROR' }
-    $exitCode = 1
+    else {
+        if ($script:FinalResultWritten) { Write-Status ('Reason: ' + $_.Exception.Message) 'ERROR' }
+        else { Write-FinalResult ('STOPPED - ' + $_.Exception.Message) 'ERROR' }
+    }
+    if ($Mode -eq 'Elevated' -and $script:LiveTransactionStarted) {
+        $exitCode = if ($script:LiveRestorationVerified) { 2 } else { 3 }
+    }
+    else { $exitCode = 1 }
 }
 exit $exitCode
